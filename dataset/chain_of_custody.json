@@ -1,0 +1,50 @@
+[
+  {
+    "id": "CST-01",
+    "evidenceId": "EVD-2026-001",
+    "action": "Seized from Crime Scene",
+    "fromUserId": "USR-IO-01",
+    "fromUserName": "Inspector Rajesh Verma",
+    "toUserId": "USR-IO-01",
+    "toUserName": "Inspector Rajesh Verma",
+    "reason": "Seized during cordon and search operation under Section 105 BNSS Panchnama.",
+    "timestamp": "2026-08-03T01:30:00Z",
+    "isVerified": true
+  },
+  {
+    "id": "CST-02",
+    "evidenceId": "EVD-2026-001",
+    "action": "Deposited in Malkhana",
+    "fromUserId": "USR-IO-01",
+    "fromUserName": "Inspector Rajesh Verma",
+    "toUserId": "USR-SUP-01",
+    "toUserName": "Malkhana Incharge ACP Sunita Mehta",
+    "reason": "Official deposit in safe custody with wax seal verification.",
+    "timestamp": "2026-08-03T03:00:00Z",
+    "isVerified": true
+  },
+  {
+    "id": "CST-03",
+    "evidenceId": "EVD-2026-001",
+    "action": "Dispatched to CFSL",
+    "fromUserId": "USR-SUP-01",
+    "fromUserName": "ACP Sunita Mehta",
+    "toUserId": "USR-FOR-01",
+    "toUserName": "Dr. Ramesh Rao (CFSL Senior Scientific Officer)",
+    "reason": "Forwarded via official police courier for ballistic comparison macroscopy.",
+    "timestamp": "2026-08-04T09:30:00Z",
+    "isVerified": true
+  },
+  {
+    "id": "CST-04",
+    "evidenceId": "EVD-2026-003",
+    "action": "Forensic Write-Block Image Generated",
+    "fromUserId": "USR-IO-01",
+    "fromUserName": "Inspector Rajesh Verma",
+    "toUserId": "USR-FOR-01",
+    "toUserName": "Dr. Ramesh Rao (CFSL)",
+    "reason": "Acquired SHA-256 physical bit-stream image under Section 63 BSA guidelines.",
+    "timestamp": "2026-08-15T12:00:00Z",
+    "isVerified": true
+  }
+]

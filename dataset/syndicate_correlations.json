@@ -1,0 +1,61 @@
+[
+  {
+    "id": "CORR-001",
+    "correlationType": "PHONE_NUMBER",
+    "identifierValue": "+91 98210 55432",
+    "confidenceScore": 0.98,
+    "description": "Single encrypted burner mobile number actively identified across 5 distinct FIR dockets spanning Robbery, Narcotics, Homicide, and Kidnapping.",
+    "matchedCaseNumbers": [
+      "FIR-2026-CRB-102",
+      "FIR-2026-WS-103",
+      "FIR-2026-NDPS-204",
+      "FIR-2026-HOM-507",
+      "FIR-2026-KID-810"
+    ],
+    "matchedCaseIds": [
+      "CAS-2026-002",
+      "CAS-2026-003",
+      "CAS-2026-004",
+      "CAS-2026-007",
+      "CAS-2026-010"
+    ],
+    "legalRelevance": "Direct statutory link under Section 111 BNS (Organized Crime Syndicate Operation).",
+    "firstObservedDate": "2026-08-02"
+  },
+  {
+    "id": "CORR-002",
+    "correlationType": "BALLISTIC_FIREARM",
+    "identifierValue": "WB-8819 (Striation Fingerprint)",
+    "confidenceScore": 0.99,
+    "description": "CFSL Ballistics Comparison Confirmed: The 9mm country pistol seized in Hauz Khas Robbery fired the fatal bullet recovered from Ridge Homicide victim.",
+    "matchedCaseNumbers": [
+      "FIR-2026-CRB-102",
+      "FIR-2026-HOM-507"
+    ],
+    "matchedCaseIds": [
+      "CAS-2026-002",
+      "CAS-2026-007"
+    ],
+    "legalRelevance": "Scientific ballistic linkage under Section 45 BSA & Section 27 Arms Act connects same accused to capital homicide.",
+    "firstObservedDate": "2026-08-08"
+  },
+  {
+    "id": "CORR-003",
+    "correlationType": "VEHICLE_CHASSIS",
+    "identifierValue": "Mahindra Scorpio (DL-1CAB-9042)",
+    "confidenceScore": 0.95,
+    "description": "Black Scorpio with counterfeit registration plate DL-1CAB-9042 utilized as getaway transport in Hauz Khas Dacoity, FICN transport, and stolen in AATS case.",
+    "matchedCaseNumbers": [
+      "FIR-2026-CRB-102",
+      "FIR-2026-EOW-305",
+      "FIR-2026-AOT-608"
+    ],
+    "matchedCaseIds": [
+      "CAS-2026-002",
+      "CAS-2026-005",
+      "CAS-2026-008"
+    ],
+    "legalRelevance": "Instrument of Crime (Section 105 BNSS Seizure & Section 317 BNS Stolen Property Retention).",
+    "firstObservedDate": "2026-08-03"
+  }
+]

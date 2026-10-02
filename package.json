@@ -1,0 +1,29 @@
+{
+  "name": "nyayasetu",
+  "version": "1.0.0",
+  "description": "NyayaSetu — Secure Digital Document Management & Evidentiary Integrity System for Law Enforcement & Judiciary",
+  "scripts": {
+    "dev": "concurrently \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "build": "npm run build --prefix server && npm run build --prefix client",
+    "test": "npm run test --prefix server",
+    "seed": "npm run seed --prefix server",
+    "seed:csv": "npm run seed:csv --prefix server"
+  },
+  "keywords": [
+    "nyayasetu",
+    "dms",
+    "security",
+    "blockchain",
+    "law-enforcement",
+    "chain-of-custody",
+    "digital-signatures",
+    "auditability"
+  ],
+  "author": "NyayaSetu Team",
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "concurrently": "^10.0.5"
+  }
+}

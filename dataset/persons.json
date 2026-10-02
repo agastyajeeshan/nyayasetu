@@ -1,0 +1,110 @@
+[
+  {
+    "id": "PER-2026-001",
+    "fullName": "Vikram Malhotra",
+    "aliases": [
+      "Vicky Shooter",
+      "V-Don",
+      "CryptoViper"
+    ],
+    "role": "Accused",
+    "dateOfBirth": "1992-06-14",
+    "gender": "Male",
+    "nationality": "Indian",
+    "phoneNumbers": [
+      "+91 98210 55432",
+      "+91 99100 22110"
+    ],
+    "aadhaarHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "primaryAddress": "House 44, Gali No. 3, Sangam Vihar, New Delhi",
+    "associatedCases": [
+      "CAS-2026-001",
+      "CAS-2026-002",
+      "CAS-2026-004",
+      "CAS-2026-007",
+      "CAS-2026-008",
+      "CAS-2026-010"
+    ],
+    "custodyStatus": "Under Judicial Remand",
+    "dnaProfileAvailable": true,
+    "riskScore": 0.94,
+    "notes": "Kingpin of multi-jurisdiction syndicate coordinating armed robberies, drug consignments, and corporate extortion.",
+    "createdAt": "2026-08-03T10:00:00Z",
+    "updatedAt": "2026-08-28T18:00:00Z"
+  },
+  {
+    "id": "PER-2026-002",
+    "fullName": "Rameshwar Dayal Verma",
+    "aliases": [
+      "R.D. Verma"
+    ],
+    "role": "Complainant",
+    "dateOfBirth": "1972-04-11",
+    "gender": "Male",
+    "nationality": "Indian",
+    "phoneNumbers": [
+      "+91 98188 77665"
+    ],
+    "primaryAddress": "C-33, Hauz Khas Enclave, New Delhi",
+    "associatedCases": [
+      "CAS-2026-002"
+    ],
+    "custodyStatus": "Not in Custody",
+    "dnaProfileAvailable": false,
+    "riskScore": 0.1,
+    "notes": "Proprietor of Verma Jewelers and primary victim/informant.",
+    "createdAt": "2026-08-03T10:00:00Z",
+    "updatedAt": "2026-08-03T10:00:00Z"
+  },
+  {
+    "id": "PER-2026-003",
+    "fullName": "Ramesh Kumar",
+    "aliases": [
+      "Ramesh Guard"
+    ],
+    "role": "Witness",
+    "dateOfBirth": "1988-11-20",
+    "gender": "Male",
+    "nationality": "Indian",
+    "phoneNumbers": [
+      "+91 98102 33441"
+    ],
+    "primaryAddress": "Village Hauz Khas, Near Community Centre, New Delhi",
+    "associatedCases": [
+      "CAS-2026-002"
+    ],
+    "custodyStatus": "Not in Custody",
+    "dnaProfileAvailable": false,
+    "riskScore": 0.15,
+    "notes": "Eyewitness security guard who resisted assailants and identified getaway vehicle Scorpio DL-1CAB-9042.",
+    "createdAt": "2026-08-04T10:00:00Z",
+    "updatedAt": "2026-08-04T10:00:00Z"
+  },
+  {
+    "id": "PER-2026-004",
+    "fullName": "Aslam Qureshi",
+    "aliases": [
+      "Ustad",
+      "Press Master"
+    ],
+    "role": "Accused",
+    "dateOfBirth": "1983-09-02",
+    "gender": "Male",
+    "nationality": "Indian",
+    "phoneNumbers": [
+      "+91 98210 55432",
+      "+91 98733 11002"
+    ],
+    "primaryAddress": "Plot 12, Chhatta Lal Mian, Daryaganj, Delhi",
+    "associatedCases": [
+      "CAS-2026-005",
+      "CAS-2026-008"
+    ],
+    "custodyStatus": "Arrested / Police Custody",
+    "dnaProfileAvailable": true,
+    "riskScore": 0.88,
+    "notes": "Chief of high-grade counterfeit currency printing ring, procuring stolen vehicles from Vikram Malhotra gang.",
+    "createdAt": "2026-08-26T04:00:00Z",
+    "updatedAt": "2026-08-28T12:00:00Z"
+  }
+]
