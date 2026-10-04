@@ -6,7 +6,7 @@ import { ReviewStatus } from '../types/index.js';
 const router = Router();
 
 // Add review comment
-router.post('/comments', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.post('/comments', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { documentId, comment, suggestedChanges } = req.body;
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
@@ -16,7 +16,7 @@ router.post('/comments', authenticateJWT, (req: AuthenticatedRequest, res: Respo
       return;
     }
 
-    const result = ReviewService.addComment({
+    const result = await ReviewService.addComment({
       documentId,
       comment,
       suggestedChanges,
@@ -34,7 +34,7 @@ router.post('/comments', authenticateJWT, (req: AuthenticatedRequest, res: Respo
 });
 
 // Update review status (Supervisor, Prosecutor, Judge, Admin)
-router.patch('/status', authenticateJWT, requireRoles('supervisor', 'prosecutor', 'judge', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.patch('/status', authenticateJWT, requireRoles('supervisor', 'prosecutor', 'judge', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { documentId, status, feedback } = req.body;
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
@@ -44,7 +44,7 @@ router.patch('/status', authenticateJWT, requireRoles('supervisor', 'prosecutor'
       return;
     }
 
-    const result = ReviewService.updateReviewStatus({
+    const result = await ReviewService.updateReviewStatus({
       documentId,
       status: status as ReviewStatus,
       feedback,
@@ -62,7 +62,7 @@ router.patch('/status', authenticateJWT, requireRoles('supervisor', 'prosecutor'
 });
 
 // Digitally sign document version
-router.post('/sign', authenticateJWT, requireRoles('supervisor', 'investigating_officer', 'prosecutor', 'judge', 'forensic_officer', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.post('/sign', authenticateJWT, requireRoles('supervisor', 'investigating_officer', 'prosecutor', 'judge', 'forensic_officer', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { documentId, versionNumber } = req.body;
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
@@ -72,7 +72,7 @@ router.post('/sign', authenticateJWT, requireRoles('supervisor', 'investigating_
       return;
     }
 
-    const signature = ReviewService.signDocument({
+    const signature = await ReviewService.signDocument({
       documentId,
       versionNumber: parseInt(versionNumber, 10),
       actorId: req.user!.id,
@@ -90,9 +90,9 @@ router.post('/sign', authenticateJWT, requireRoles('supervisor', 'investigating_
 });
 
 // Verify digital signature
-router.get('/signatures/:id/verify', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.get('/signatures/:id/verify', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const result = ReviewService.verifySignature(req.params.id as string);
+    const result = await ReviewService.verifySignature(req.params.id as string);
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message });

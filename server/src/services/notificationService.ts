@@ -1,54 +1,40 @@
 import crypto from 'crypto';
-import { db } from '../db/database.js';
+import { NotificationRepository } from '../repositories/notificationRepository.js';
 import { NotificationItem, UserRole } from '../types/index.js';
 
 export class NotificationService {
   /**
-   * Retrieves notifications filtered for user / role
+   * Retrieves notifications filtered for user / role from PostgreSQL
    */
-  public static getNotifications(userId?: string, role?: UserRole): NotificationItem[] {
-    return db.notifications
-      .filter(n => {
-        if (n.recipientUserId && userId && n.recipientUserId !== userId) return false;
-        if (n.recipientRole && role && n.recipientRole !== role && role !== 'admin') return false;
-        return true;
-      })
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  public static async getNotifications(userId?: string, role?: UserRole): Promise<NotificationItem[]> {
+    return await NotificationRepository.findByUserId(userId || '', role);
   }
 
   /**
-   * Counts unread notifications
+   * Counts unread notifications in PostgreSQL
    */
-  public static getUnreadCount(userId?: string, role?: UserRole): number {
-    return this.getNotifications(userId, role).filter(n => !n.isRead).length;
+  public static async getUnreadCount(userId?: string, role?: UserRole): Promise<number> {
+    return await NotificationRepository.countUnread(userId, role);
   }
 
   /**
-   * Mark single notification as read
+   * Mark single notification as read in PostgreSQL
    */
-  public static markAsRead(id: string): boolean {
-    const n = db.notifications.find(item => item.id === id);
-    if (!n) return false;
-    n.isRead = true;
-    db.save();
-    return true;
+  public static async markAsRead(id: string): Promise<boolean> {
+    return await NotificationRepository.markAsRead(id);
   }
 
   /**
-   * Mark all notifications as read for user
+   * Mark all notifications as read for user in PostgreSQL
    */
-  public static markAllAsRead(userId?: string, role?: UserRole): void {
-    const list = this.getNotifications(userId, role);
-    list.forEach(n => {
-      n.isRead = true;
-    });
-    db.save();
+  public static async markAllAsRead(userId?: string, role?: UserRole): Promise<void> {
+    await NotificationRepository.markAllAsReadForUser(userId, role);
   }
 
   /**
-   * Emit new notification
+   * Emit new notification in PostgreSQL
    */
-  public static createNotification(data: Omit<NotificationItem, 'id' | 'createdAt' | 'isRead'>): NotificationItem {
+  public static async createNotification(data: Omit<NotificationItem, 'id' | 'createdAt' | 'isRead'>): Promise<NotificationItem> {
     const newNotif: NotificationItem = {
       id: crypto.randomUUID(),
       ...data,
@@ -56,13 +42,7 @@ export class NotificationService {
       createdAt: new Date().toISOString()
     };
 
-    db.notifications.unshift(newNotif);
-    // Keep max 200 notifications
-    if (db.notifications.length > 200) {
-      db.notifications.splice(200);
-    }
-    db.save();
-
+    await NotificationRepository.create(newNotif);
     return newNotif;
   }
 }

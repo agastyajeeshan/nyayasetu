@@ -6,14 +6,18 @@ import { AssetType, AssetStatus } from '../types/index.js';
 const router = Router();
 
 // List police assets
-router.get('/', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  const { type, status, department, search } = req.query as Record<string, string>;
-  const assets = AssetService.listAssets({ type, status, department, search });
-  res.json(assets);
+router.get('/', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { type, status, department, search } = req.query as Record<string, string>;
+    const assets = await AssetService.listAssets({ type, status, department, search });
+    res.json(assets);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Register new asset (Supervisor, Admin)
-router.post('/', authenticateJWT, requireRoles('supervisor', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.post('/', authenticateJWT, requireRoles('supervisor', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { name, type, serialNumber, department, location, condition, purchaseDate, warrantyExpiry, currentCustodianName, linkedCaseId, linkedEvidenceId } = req.body;
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
@@ -23,7 +27,7 @@ router.post('/', authenticateJWT, requireRoles('supervisor', 'admin'), (req: Aut
       return;
     }
 
-    const asset = AssetService.createAsset({
+    const asset = await AssetService.createAsset({
       name,
       type: type as AssetType,
       serialNumber,
@@ -49,17 +53,21 @@ router.post('/', authenticateJWT, requireRoles('supervisor', 'admin'), (req: Aut
 });
 
 // Get asset detail with lifecycle history
-router.get('/:id', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  const detail = AssetService.getAssetDetail(req.params.id as string);
-  if (!detail) {
-    res.status(404).json({ error: 'Asset not found.' });
-    return;
+router.get('/:id', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const detail = await AssetService.getAssetDetail(req.params.id as string);
+    if (!detail) {
+      res.status(404).json({ error: 'Asset not found.' });
+      return;
+    }
+    res.json(detail);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
-  res.json(detail);
 });
 
 // Update asset lifecycle status
-router.patch('/:id/status', authenticateJWT, requireRoles('supervisor', 'investigating_officer', 'forensic_officer', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.patch('/:id/status', authenticateJWT, requireRoles('supervisor', 'investigating_officer', 'forensic_officer', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { status, eventType, toCustodian, location, condition, details } = req.body;
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
@@ -69,7 +77,7 @@ router.patch('/:id/status', authenticateJWT, requireRoles('supervisor', 'investi
       return;
     }
 
-    const updated = AssetService.updateAssetStatus({
+    const updated = await AssetService.updateAssetStatus({
       assetId: req.params.id as string,
       status: status as AssetStatus,
       eventType,

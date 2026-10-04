@@ -119,19 +119,10 @@ class Database {
   }
 
   public save(): void {
-    if (this.isPersisting) return;
-    this.isPersisting = true;
-    try {
-      fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), 'utf-8');
-      // Background async write-through to PostgreSQL
-      import('./postgres.js').then(({ PostgresService }) => {
-        PostgresService.syncAllFromMemory(this.data).catch(() => {});
-      }).catch(() => {});
-    } catch (err) {
-      console.error('Failed to persist database:', err);
-    } finally {
-      this.isPersisting = false;
-    }
+    // RUNTIME WRITE-BACK DECOMMISSIONED:
+    // NyayaSetu runs exclusively on PostgreSQL as the authoritative single source of truth.
+    // Writes to database.json are strictly disallowed.
+    console.warn('[Database] Runtime JSON write ignored. NyayaSetu is running in PostgreSQL-only persistence mode.');
   }
 
   // Getters for tables

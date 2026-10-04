@@ -1,22 +1,25 @@
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert';
-import { db } from '../db/database.js';
-import { seedDatabase } from '../db/seed.js';
+import { PostgresService } from '../db/postgres.js';
+import { DocumentRepository } from '../repositories/documentRepository.js';
+import { CaseRepository } from '../repositories/caseRepository.js';
 import { CaseService } from '../services/caseService.js';
 import { DocumentService } from '../services/documentService.js';
 import { IntelligenceService } from '../services/intelligenceService.js';
 import { AuditService } from '../services/auditService.js';
 
-describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
+describe('NyayaSetu 10 Core Enhancements Test Suite (PostgreSQL Persistence)', () => {
   before(async () => {
-    await seedDatabase();
+    const conn = await PostgresService.testConnection();
+    assert.strictEqual(conn.connected, true, 'PostgreSQL connection must be active for tests');
+    await PostgresService.initializeSchema();
   });
 
   const testCaseId = 'CAS-2026-001';
 
   // Feature 1: Evidence Timeline
-  test('Feature 1: Comprehensive Evidence Timeline synthesizes multi-source events', () => {
-    const timeline = CaseService.getComprehensiveTimeline(testCaseId);
+  test('Feature 1: Comprehensive Evidence Timeline synthesizes multi-source events from PostgreSQL', async () => {
+    const timeline = await CaseService.getComprehensiveTimeline(testCaseId);
     assert.ok(Array.isArray(timeline), 'Timeline must return an array');
     assert.ok(timeline.length > 0, 'Timeline must contain chronological events');
 
@@ -37,8 +40,8 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
   });
 
   // Feature 2: Entity Relationship Graph
-  test('Feature 2: Entity Relationship View returns complete 7-type graph topology', () => {
-    const graph = IntelligenceService.getKnowledgeGraph(testCaseId);
+  test('Feature 2: Entity Relationship View returns complete 7-type graph topology from PostgreSQL', async () => {
+    const graph = await IntelligenceService.getKnowledgeGraph(testCaseId);
     assert.ok(Array.isArray(graph.nodes), 'Graph must have nodes');
     assert.ok(Array.isArray(graph.edges), 'Graph must have edges');
     assert.ok(graph.nodes.length >= 3, 'Graph should have multiple interconnected nodes');
@@ -57,8 +60,8 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
   });
 
   // Feature 3: Contradiction Detection
-  test('Feature 3: Contradiction Detection uses non-declarative analytical phrasing', () => {
-    const discrepancies = IntelligenceService.getDiscrepancies(testCaseId);
+  test('Feature 3: Contradiction Detection uses non-declarative analytical phrasing', async () => {
+    const discrepancies = await IntelligenceService.getDiscrepancies(testCaseId);
     assert.ok(Array.isArray(discrepancies), 'Discrepancies must return an array');
     assert.ok(discrepancies.length > 0, 'Discrepancies must detect potential conflicts');
 
@@ -74,8 +77,8 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
   });
 
   // Feature 4: Case Completeness / Readiness
-  test('Feature 4: Case Readiness evaluates the 10 statutory standards with real scores', () => {
-    const readiness = CaseService.calculateCaseReadiness(testCaseId);
+  test('Feature 4: Case Readiness evaluates the 10 statutory standards with real scores from PostgreSQL', async () => {
+    const readiness = await CaseService.calculateCaseReadiness(testCaseId);
     assert.strictEqual(readiness.caseId, testCaseId);
     assert.ok(typeof readiness.completenessScore === 'number', 'Completeness score must be numeric');
     assert.ok(readiness.completenessScore >= 0 && readiness.completenessScore <= 100, 'Score must be between 0 and 100');
@@ -89,14 +92,14 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
   });
 
   // Feature 5: Document Version Comparison
-  test('Feature 5: Document Version Comparison computes text diff and independent hashes', async () => {
-    // Pick an existing document
-    const docs = db.documents.filter(d => !d.isDeleted);
+  test('Feature 5: Document Version Comparison computes text diff and independent hashes in PostgreSQL', async () => {
+    // Pick an existing document from PostgreSQL
+    const docs = await DocumentRepository.findMany({ limit: 10 });
     assert.ok(docs.length > 0, 'Must have at least one document');
     const doc = docs[0];
 
     // Upload v2 if doc only has 1 version
-    const versions = db.document_versions.filter(v => v.documentId === doc.id);
+    const versions = await DocumentRepository.findVersionsByDocId(doc.id);
     if (versions.length < 2) {
       await DocumentService.uploadNewVersion({
         documentId: doc.id,
@@ -107,6 +110,7 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
         actorId: 'USR-IO-01',
         actorName: 'Inspector Rajesh Verma',
         actorRole: 'investigating_officer',
+        actorDepartment: 'Crime Branch Special Cell',
         ipAddress: '127.0.0.1'
       });
     }
@@ -122,8 +126,7 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
   });
 
   // Feature 6: Secure PII Redaction
-  test('Feature 6: Secure PII Redaction produces non-destructive derivative with separate seal', async () => {
-    // Create dedicated document with known PII markers
+  test('Feature 6: Secure PII Redaction produces non-destructive derivative with separate seal in PostgreSQL', async () => {
     const piiBuffer = Buffer.from(
       'FIRST INFORMATION REPORT: Complainant Rajesh Kumar, Phone: +91 9811044219, Email: rajesh.k@nic.in, Aadhaar: 5491 8821 0042, PAN: ABCDE1234F, Address: House 42, Sector 15, Rohini, New Delhi 110085.',
       'utf-8'
@@ -140,6 +143,7 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
       actorId: 'USR-IO-01',
       actorName: 'Inspector Rajesh Verma',
       actorRole: 'investigating_officer',
+      actorDepartment: 'Crime Branch Special Cell',
       ipAddress: '127.0.0.1'
     });
 
@@ -149,9 +153,9 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
     assert.ok(detected.length > 0, 'Sample text should match PII regex patterns');
 
     // 2. Create Redacted Derivative
-    const originalCount = db.redacted_documents.length;
     const derivative = await DocumentService.createRedactedDerivative({
       documentId: doc.id,
+      versionNumber: 1,
       selectedRedactions: detected,
       exportPurpose: 'Right to Information (RTI) Compliance',
       actor: {
@@ -165,15 +169,17 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
     assert.ok(derivative.id, 'Derivative must have unique ID');
     assert.strictEqual(derivative.originalDocumentId, doc.id);
     assert.ok(derivative.sha256Hash, 'Derivative must have sovereign SHA-256 seal');
-    assert.strictEqual(db.redacted_documents.length, originalCount + 1, 'Derivative must be persisted in database');
+
+    const redactedInDb = await DocumentRepository.findRedactedById(derivative.id);
+    assert.ok(redactedInDb, 'Derivative must be persisted in PostgreSQL');
 
     // 3. Verify original document was NOT modified
-    const originalDoc = db.documents.find(d => d.id === doc.id);
-    assert.ok(originalDoc, 'Original document must exist intact');
+    const originalDoc = await DocumentRepository.findById(doc.id);
+    assert.ok(originalDoc, 'Original document must exist intact in PostgreSQL');
   });
 
   // Feature 7: Evidence Integrity Center
-  test('Feature 7: Evidence Integrity Center verifies live hashes and Merkle anchors', async () => {
+  test('Feature 7: Evidence Integrity Center verifies live hashes and Merkle anchors in PostgreSQL', async () => {
     const report = await DocumentService.getIntegrityCenterReport(testCaseId);
     assert.ok(Array.isArray(report), 'Integrity report must return an array');
     assert.ok(report.length > 0, 'Integrity report must contain items for the case');
@@ -218,26 +224,26 @@ describe('NyayaSetu 10 Core Enhancements Test Suite', () => {
   });
 
   // Feature 9: Audit Trail Filtering
-  test('Feature 9: Enhanced Audit Trail filters by role, category, and security exceptions', () => {
+  test('Feature 9: Enhanced Audit Trail filters by role, category, and security exceptions in PostgreSQL', async () => {
     // 1. Role filter
-    const roleLogs = AuditService.queryLogs({ role: 'investigating_officer', limit: 20 });
+    const roleLogs = await AuditService.queryLogs({ role: 'investigating_officer', limit: 20 });
     assert.ok(Array.isArray(roleLogs.logs), 'Role logs must return array');
     roleLogs.logs.forEach(l => {
       assert.strictEqual(l.actorRole, 'investigating_officer');
     });
 
     // 2. Action Category filter
-    const authLogs = AuditService.queryLogs({ actionCategory: 'AUTHENTICATION', limit: 20 });
+    const authLogs = await AuditService.queryLogs({ actionCategory: 'AUTHENTICATION', limit: 20 });
     assert.ok(Array.isArray(authLogs.logs), 'Category logs must return array');
 
     // 3. Security Event filter
-    const secLogs = AuditService.queryLogs({ isSecurityEvent: true, limit: 20 });
+    const secLogs = await AuditService.queryLogs({ isSecurityEvent: true, limit: 20 });
     assert.ok(Array.isArray(secLogs.logs), 'Security event logs must return array');
   });
 
   // Feature 10: Investigation Summary
-  test('Feature 10: Investigation Summary compiles 10 structured sections with citations', () => {
-    const summary = CaseService.generateInvestigationSummary(testCaseId);
+  test('Feature 10: Investigation Summary compiles 10 structured sections with citations from PostgreSQL', async () => {
+    const summary = await CaseService.generateInvestigationSummary(testCaseId);
     assert.ok(summary.caseOverview, '1. Case overview must be present');
     assert.ok(summary.caseOverview.sourceCitation, 'Overview must have source citation');
     assert.ok(Array.isArray(summary.keyPeople), '2. Key people must be present');

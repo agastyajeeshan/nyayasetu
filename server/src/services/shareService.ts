@@ -1,8 +1,12 @@
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/database.js';
 import { CryptoService } from './cryptoService.js';
 import { AuditService } from './auditService.js';
+import {
+  ShareRepository,
+  DocumentRepository,
+  CaseRepository
+} from '../repositories/index.js';
 import { ShareLink, ShareAccessLog, UserRole } from '../types/index.js';
 
 export interface CreateShareParams {
@@ -25,20 +29,20 @@ export interface CreateShareParams {
 
 export class ShareService {
   /**
-   * Generates a secure, unguessable expiring share link
+   * Generates a secure, unguessable expiring share link in PostgreSQL
    */
-  public static createShare(params: CreateShareParams): ShareLink {
+  public static async createShare(params: CreateShareParams): Promise<ShareLink> {
     if (!params.documentId && !params.caseId) {
       throw new Error('Must specify either a documentId or caseId to share.');
     }
 
     let resourceTitle = 'Confidential Resource';
     if (params.documentId) {
-      const doc = db.documents.find(d => d.id === params.documentId);
+      const doc = await DocumentRepository.findById(params.documentId);
       if (!doc) throw new Error('Document not found');
       resourceTitle = `${doc.documentNumber}: ${doc.title}`;
     } else if (params.caseId) {
-      const caseItem = db.cases.find(c => c.id === params.caseId);
+      const caseItem = await CaseRepository.findById(params.caseId);
       if (!caseItem) throw new Error('Case not found');
       resourceTitle = `${caseItem.caseNumber}: ${caseItem.title}`;
     }
@@ -76,10 +80,9 @@ export class ShareService {
       createdAt: new Date().toISOString()
     };
 
-    db.share_links.unshift(share);
-    db.save();
+    await ShareRepository.create(share);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: params.actorId,
       actorName: params.actorName,
       actorRole: params.actorRole,
@@ -98,48 +101,48 @@ export class ShareService {
   }
 
   /**
-   * Accesses a shared resource via token
+   * Accesses a shared resource via token in PostgreSQL
    */
-  public static accessSharedResource(token: string, passcode?: string, ipAddress = '127.0.0.1', userAgent = ''): {
+  public static async accessSharedResource(token: string, passcode?: string, ipAddress = '127.0.0.1', userAgent = ''): Promise<{
     success: boolean;
     share?: ShareLink;
     resource?: any;
     error?: string;
-  } {
-    const share = db.share_links.find(s => s.shareToken === token);
+  }> {
+    const share = await ShareRepository.findByToken(token);
     if (!share) {
       return { success: false, error: 'Invalid or non-existent share link.' };
     }
 
     if (share.isRevoked) {
-      this.logAccess(share.id, 'REVOKED_ATTEMPT', 'DENIED', ipAddress, userAgent);
+      await this.logAccess(share.id, 'REVOKED_ATTEMPT', 'DENIED', ipAddress, userAgent);
       return { success: false, error: 'This secure share link has been revoked by the issuing authority.' };
     }
 
     if (new Date(share.expiresAt).getTime() < Date.now()) {
-      this.logAccess(share.id, 'PREVIEW', 'DENIED', ipAddress, userAgent);
+      await this.logAccess(share.id, 'PREVIEW', 'DENIED', ipAddress, userAgent);
       return { success: false, error: 'This secure share link has expired.' };
     }
 
     if (share.accessPasscodeHash) {
       if (!passcode || CryptoService.sha256(passcode) !== share.accessPasscodeHash) {
-        this.logAccess(share.id, 'FAILED_PASSCODE', 'DENIED', ipAddress, userAgent);
+        await this.logAccess(share.id, 'FAILED_PASSCODE', 'DENIED', ipAddress, userAgent);
         return { success: false, error: 'Invalid access passcode required for this protected document.' };
       }
     }
 
+    await ShareRepository.incrementAccessCount(share.id);
     share.accessCount += 1;
-    this.logAccess(share.id, 'PREVIEW', 'SUCCESS', ipAddress, userAgent);
-    db.save();
+    await this.logAccess(share.id, 'PREVIEW', 'SUCCESS', ipAddress, userAgent);
 
     let resource: any = null;
     if (share.documentId) {
-      const doc = db.documents.find(d => d.id === share.documentId);
-      const versions = db.document_versions.filter(v => v.documentId === share.documentId);
+      const doc = await DocumentRepository.findById(share.documentId);
+      const versions = await DocumentRepository.findVersionsByDocId(share.documentId);
       resource = { document: doc, versions };
     } else if (share.caseId) {
-      const c = db.cases.find(c => c.id === share.caseId);
-      const docs = db.documents.filter(d => d.caseId === share.caseId && !d.isDeleted);
+      const c = await CaseRepository.findById(share.caseId);
+      const docs = await DocumentRepository.findByCaseId(share.caseId);
       resource = { case: c, documents: docs };
     }
 
@@ -147,18 +150,15 @@ export class ShareService {
   }
 
   /**
-   * Revokes a share link immediately
+   * Revokes a share link immediately in PostgreSQL
    */
-  public static revokeShare(shareId: string, actor: { id: string; name: string; role: UserRole; ip: string }): boolean {
-    const share = db.share_links.find(s => s.id === shareId);
+  public static async revokeShare(shareId: string, actor: { id: string; name: string; role: UserRole; ip: string }): Promise<boolean> {
+    const share = await ShareRepository.findById(shareId);
     if (!share) throw new Error('Share link not found.');
 
-    share.isRevoked = true;
-    share.revokedAt = new Date().toISOString();
-    share.revokedBy = actor.id;
-    db.save();
+    await ShareRepository.revoke(share.id, actor.id);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: actor.id,
       actorName: actor.name,
       actorRole: actor.role,
@@ -176,7 +176,7 @@ export class ShareService {
     return true;
   }
 
-  private static logAccess(shareId: string, action: 'PREVIEW' | 'DOWNLOAD' | 'FAILED_PASSCODE' | 'REVOKED_ATTEMPT', outcome: 'SUCCESS' | 'DENIED', ip: string, ua: string) {
+  private static async logAccess(shareId: string, action: 'PREVIEW' | 'DOWNLOAD' | 'FAILED_PASSCODE' | 'REVOKED_ATTEMPT', outcome: 'SUCCESS' | 'DENIED', ip: string, ua: string) {
     const log: ShareAccessLog = {
       id: `SHL-${Date.now()}-${uuidv4().slice(0, 6)}`,
       shareId,
@@ -186,7 +186,6 @@ export class ShareService {
       action,
       outcome
     };
-    db.share_access_logs.push(log);
-    db.save();
+    await ShareRepository.logAccess(log);
   }
 }

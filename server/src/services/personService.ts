@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import { db } from '../db/database.js';
+import { PersonRepository } from '../repositories/personRepository.js';
 import { PersonRecord, UserRole } from '../types/index.js';
 import { AuditService } from './auditService.js';
 import { LedgerService } from './ledgerService.js';
@@ -15,9 +15,9 @@ export class PersonService {
   }
 
   /**
-   * Get all persons with optional multi-facet filters
+   * Get all persons from PostgreSQL with optional multi-facet filters
    */
-  public static getPersons(filters?: {
+  public static async getPersons(filters?: {
     search?: string;
     locality?: string;
     district?: string;
@@ -26,94 +26,38 @@ export class PersonService {
     afisStatus?: string;
     caseId?: string;
     isVerifiedProfile?: boolean;
-  }): PersonRecord[] {
-    let list = [...db.persons];
-
-    if (!filters) return list;
-
-    if (filters.search) {
-      const q = filters.search.toLowerCase().trim();
-      list = list.filter(p => 
-        p.fullName.toLowerCase().includes(q) ||
-        p.cpid.toLowerCase().includes(q) ||
-        p.aliases.some(a => a.toLowerCase().includes(q)) ||
-        p.fatherOrSpouseName.toLowerCase().includes(q) ||
-        (p.primaryPhone && p.primaryPhone.includes(q)) ||
-        p.policeStation.toLowerCase().includes(q) ||
-        p.district.toLowerCase().includes(q) ||
-        p.linkedCases.some(c => c.caseNumber.toLowerCase().includes(q))
-      );
-    }
-
-    if (filters.locality) {
-      const loc = filters.locality.toLowerCase().trim();
-      list = list.filter(p => 
-        p.address.toLowerCase().includes(loc) ||
-        p.policeStation.toLowerCase().includes(loc) ||
-        p.district.toLowerCase().includes(loc) ||
-        p.state.toLowerCase().includes(loc) ||
-        p.pincode.includes(loc)
-      );
-    }
-
-    if (filters.district) {
-      list = list.filter(p => p.district.toLowerCase() === filters.district!.toLowerCase());
-    }
-
-    if (filters.policeStation) {
-      list = list.filter(p => p.policeStation.toLowerCase().includes(filters.policeStation!.toLowerCase()));
-    }
-
-    if (filters.riskRating) {
-      list = list.filter(p => p.riskRating.toLowerCase() === filters.riskRating!.toLowerCase());
-    }
-
-    if (filters.afisStatus) {
-      list = list.filter(p => p.biometrics.afisStatus === filters.afisStatus);
-    }
-
-    if (filters.caseId) {
-      list = list.filter(p => p.linkedCases.some(c => c.caseId === filters.caseId || c.caseNumber === filters.caseId));
-    }
-
-    if (typeof filters.isVerifiedProfile === 'boolean') {
-      list = list.filter(p => p.isVerifiedProfile === filters.isVerifiedProfile);
-    }
-
-    return list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+  }): Promise<PersonRecord[]> {
+    return await PersonRepository.findMany(filters);
   }
 
   /**
-   * Get person record by Internal UUID
+   * Get person record by Internal UUID from PostgreSQL
    */
-  public static getPersonById(id: string): PersonRecord | undefined {
-    return db.persons.find(p => p.id === id);
+  public static async getPersonById(id: string): Promise<PersonRecord | null> {
+    return await PersonRepository.findById(id);
   }
 
   /**
-   * Get person record by CPID
+   * Get person record by CPID from PostgreSQL
    */
-  public static getPersonByCpid(cpid: string): PersonRecord | undefined {
-    return db.persons.find(p => p.cpid.toLowerCase() === cpid.toLowerCase());
+  public static async getPersonByCpid(cpid: string): Promise<PersonRecord | null> {
+    return await PersonRepository.findByCpid(cpid);
   }
 
   /**
-   * Search persons by Case Number or Case ID
+   * Search persons by Case Number or Case ID in PostgreSQL
    */
-  public static searchPersonsByCase(caseIdentifier: string): PersonRecord[] {
-    const q = caseIdentifier.toLowerCase().trim();
-    return db.persons.filter(p => 
-      p.linkedCases.some(c => c.caseId.toLowerCase() === q || c.caseNumber.toLowerCase().includes(q))
-    );
+  public static async searchPersonsByCase(caseIdentifier: string): Promise<PersonRecord[]> {
+    return await PersonRepository.findByCase(caseIdentifier);
   }
 
   /**
-   * Create a new Criminal/Person Dossier
+   * Create a new Criminal/Person Dossier in PostgreSQL
    */
-  public static createPerson(
+  public static async createPerson(
     data: Omit<PersonRecord, 'id' | 'createdAt' | 'updatedAt' | 'cpid'> & { cpid?: string },
     actor: { id: string; name: string; role: UserRole; ip: string }
-  ): PersonRecord {
+  ): Promise<PersonRecord> {
     const stateCode = data.state ? data.state.slice(0, 2).toUpperCase() : 'DL';
     const cpid = data.cpid || this.generateCpid(stateCode);
 
@@ -147,11 +91,10 @@ export class PersonService {
       updatedAt: new Date().toISOString()
     };
 
-    db.persons.push(newPerson);
-    db.save();
+    await PersonRepository.create(newPerson);
 
     // Log in append-only ledger & audit trail
-    const block = LedgerService.createBlock({
+    await LedgerService.createBlock({
       eventType: 'PERSON_RECORD_REGISTERED',
       resourceType: 'USER',
       resourceId: newPerson.id,
@@ -166,7 +109,7 @@ export class PersonService {
       }
     });
 
-    AuditService.log({
+    await AuditService.log({
       actorId: actor.id,
       actorName: actor.name,
       actorRole: actor.role,
@@ -185,30 +128,20 @@ export class PersonService {
   }
 
   /**
-   * Update existing person record
+   * Update existing person record in PostgreSQL
    */
-  public static updatePerson(
+  public static async updatePerson(
     id: string,
     data: Partial<PersonRecord>,
     actor: { id: string; name: string; role: UserRole; ip: string }
-  ): PersonRecord | null {
-    const idx = db.persons.findIndex(p => p.id === id);
-    if (idx === -1) return null;
+  ): Promise<PersonRecord | null> {
+    const existing = await PersonRepository.findById(id);
+    if (!existing) return null;
 
-    const existing = db.persons[idx];
-    const updated: PersonRecord = {
-      ...existing,
-      ...data,
-      id: existing.id,
-      cpid: existing.cpid, // CPID remains immutable
-      createdAt: existing.createdAt,
-      updatedAt: new Date().toISOString()
-    };
+    const updated = await PersonRepository.update(id, data);
+    if (!updated) return null;
 
-    db.persons[idx] = updated;
-    db.save();
-
-    AuditService.log({
+    await AuditService.log({
       actorId: actor.id,
       actorName: actor.name,
       actorRole: actor.role,
@@ -227,9 +160,9 @@ export class PersonService {
   }
 
   /**
-   * Link a case to a person
+   * Link a case to a person in PostgreSQL
    */
-  public static linkCaseToPerson(
+  public static async linkCaseToPerson(
     personId: string,
     caseLink: {
       caseId: string;
@@ -239,22 +172,21 @@ export class PersonService {
       status: string;
     },
     actor: { id: string; name: string; role: UserRole; ip: string }
-  ): PersonRecord | null {
-    const person = this.getPersonById(personId);
+  ): Promise<PersonRecord | null> {
+    const person = await this.getPersonById(personId);
     if (!person) return null;
 
-    // Check if already linked
     const existingLinkIdx = person.linkedCases.findIndex(c => c.caseId === caseLink.caseId);
+    const updatedLinks = [...person.linkedCases];
     if (existingLinkIdx >= 0) {
-      person.linkedCases[existingLinkIdx] = caseLink;
+      updatedLinks[existingLinkIdx] = caseLink;
     } else {
-      person.linkedCases.push(caseLink);
+      updatedLinks.push(caseLink);
     }
 
-    person.updatedAt = new Date().toISOString();
-    db.save();
+    const updated = await PersonRepository.update(person.id, { linkedCases: updatedLinks });
 
-    AuditService.log({
+    await AuditService.log({
       actorId: actor.id,
       actorName: actor.name,
       actorRole: actor.role,
@@ -269,7 +201,6 @@ export class PersonService {
       ipAddress: actor.ip
     });
 
-    return person;
+    return updated;
   }
 }
-

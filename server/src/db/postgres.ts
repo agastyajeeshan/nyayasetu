@@ -80,6 +80,33 @@ export class PostgresService {
   }
 
   /**
+   * Executes a parameterized query using the connection pool
+   */
+  public static async query<R extends pg.QueryResultRow = any>(text: string, params?: any[]): Promise<pg.QueryResult<R>> {
+    const pool = this.getPool();
+    return pool.query<R>(text, params);
+  }
+
+  /**
+   * Runs an operation inside a PostgreSQL transaction (BEGIN ... COMMIT / ROLLBACK)
+   */
+  public static async withTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+    const pool = this.getPool();
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Tests connection to PostgreSQL
    */
   public static async testConnection(overrideConfig?: PostgresConfig): Promise<{ connected: boolean; version?: string; database?: string; error?: string }> {

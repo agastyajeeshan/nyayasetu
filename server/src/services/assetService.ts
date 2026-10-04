@@ -1,5 +1,5 @@
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/database.js';
+import { AssetRepository } from '../repositories/assetRepository.js';
 import { AuditService } from './auditService.js';
 import { PoliceAsset, AssetLifecycleEvent, AssetType, AssetStatus, UserRole } from '../types/index.js';
 
@@ -40,11 +40,12 @@ export interface UpdateAssetStatusParams {
 
 export class AssetService {
   /**
-   * Registers a new police asset
+   * Registers a new police asset in PostgreSQL
    */
-  public static createAsset(params: CreateAssetParams): PoliceAsset {
+  public static async createAsset(params: CreateAssetParams): Promise<PoliceAsset> {
     const assetId = `AST-${Date.now()}-${uuidv4().slice(0, 6)}`;
-    const assetNumber = `AST-DEL-${new Date().getFullYear()}-${db.police_assets.length + 101}`;
+    const count = await AssetRepository.count();
+    const assetNumber = `AST-DEL-${new Date().getFullYear()}-${count + 101}`;
 
     const asset: PoliceAsset = {
       id: assetId,
@@ -66,7 +67,7 @@ export class AssetService {
       updatedAt: new Date().toISOString()
     };
 
-    db.police_assets.unshift(asset);
+    await AssetRepository.create(asset);
 
     const initEvent: AssetLifecycleEvent = {
       id: `ALC-${Date.now()}-${uuidv4().slice(0, 6)}`,
@@ -81,10 +82,9 @@ export class AssetService {
       toCustodian: asset.currentCustodianName
     };
 
-    db.asset_lifecycle_events.push(initEvent);
-    db.save();
+    await AssetRepository.addLifecycleEvent(initEvent);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: params.actorId,
       actorName: params.actorName,
       actorRole: params.actorRole,
@@ -103,20 +103,22 @@ export class AssetService {
   }
 
   /**
-   * Updates asset lifecycle status (Assign, Maintenance, Return, Inspect)
+   * Updates asset lifecycle status (Assign, Maintenance, Return, Inspect) in PostgreSQL
    */
-  public static updateAssetStatus(params: UpdateAssetStatusParams): PoliceAsset {
-    const asset = db.police_assets.find(a => a.id === params.assetId);
+  public static async updateAssetStatus(params: UpdateAssetStatusParams): Promise<PoliceAsset> {
+    const asset = await AssetRepository.findById(params.assetId);
     if (!asset) throw new Error('Asset not found.');
 
     const oldStatus = asset.status;
     const oldCustodian = asset.currentCustodianName;
 
-    asset.status = params.status;
-    if (params.toCustodian) asset.currentCustodianName = params.toCustodian;
-    if (params.location) asset.location = params.location;
-    if (params.condition) asset.condition = params.condition as any;
-    asset.updatedAt = new Date().toISOString();
+    const updated = await AssetRepository.update(asset.id, {
+      status: params.status,
+      currentCustodianName: params.toCustodian || asset.currentCustodianName,
+      location: params.location || asset.location,
+      condition: (params.condition as any) || asset.condition,
+      updatedAt: new Date().toISOString()
+    });
 
     const event: AssetLifecycleEvent = {
       id: `ALC-${Date.now()}-${uuidv4().slice(0, 6)}`,
@@ -128,14 +130,13 @@ export class AssetService {
       actorName: params.actorName,
       timestamp: new Date().toISOString(),
       details: params.details,
-      condition: asset.condition,
-      location: asset.location
+      condition: params.condition || asset.condition,
+      location: params.location || asset.location
     };
 
-    db.asset_lifecycle_events.push(event);
-    db.save();
+    await AssetRepository.addLifecycleEvent(event);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: params.actorId,
       actorName: params.actorName,
       actorRole: params.actorRole,
@@ -150,48 +151,26 @@ export class AssetService {
       ipAddress: params.ipAddress
     });
 
-    return asset;
+    return updated || asset;
   }
 
   /**
-   * Retrieves asset detail with lifecycle history
+   * Retrieves asset detail with lifecycle history from PostgreSQL
    */
-  public static getAssetDetail(assetId: string): { asset: PoliceAsset; history: AssetLifecycleEvent[] } | null {
-    const asset = db.police_assets.find(a => a.id === assetId || a.assetNumber === assetId);
+  public static async getAssetDetail(assetId: string): Promise<{ asset: PoliceAsset; history: AssetLifecycleEvent[] } | null> {
+    const asset = await AssetRepository.findByIdOrNumber(assetId);
     if (!asset) return null;
 
-    const history = db.asset_lifecycle_events
-      .filter(e => e.assetId === asset.id)
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const history = asset.lifecycleHistory || (await AssetRepository.getLifecycleHistory(asset.id));
+    history.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
     return { asset, history };
   }
 
   /**
-   * Lists assets with filters
+   * Lists assets with filters from PostgreSQL
    */
-  public static listAssets(filters: { type?: string; status?: string; department?: string; search?: string }): PoliceAsset[] {
-    let list = [...db.police_assets];
-
-    if (filters.type) {
-      list = list.filter(a => a.type === filters.type);
-    }
-    if (filters.status) {
-      list = list.filter(a => a.status === filters.status);
-    }
-    if (filters.department) {
-      list = list.filter(a => a.department === filters.department);
-    }
-    if (filters.search) {
-      const q = filters.search.toLowerCase();
-      list = list.filter(a =>
-        a.assetNumber.toLowerCase().includes(q) ||
-        a.name.toLowerCase().includes(q) ||
-        a.serialNumber.toLowerCase().includes(q) ||
-        (a.currentCustodianName && a.currentCustodianName.toLowerCase().includes(q))
-      );
-    }
-
-    return list;
+  public static async listAssets(filters: { type?: string; status?: string; department?: string; search?: string }): Promise<PoliceAsset[]> {
+    return await AssetRepository.findMany(filters);
   }
 }

@@ -5,14 +5,14 @@ import { authenticateJWT, requireRoles, AuthenticatedRequest } from '../middlewa
 const router = Router();
 
 // Get cases (filtered by role and search)
-router.get('/', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.get('/', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   const { status, priority, search } = req.query as Record<string, string>;
-  const cases = CaseService.getCases(req.user!, { status, priority, search });
+  const cases = await CaseService.getCases(req.user!, { status, priority, search });
   res.json(cases);
 });
 
 // Create new case (IO, Supervisor, Admin)
-router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   const { 
     title, 
     type, 
@@ -68,7 +68,7 @@ router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervi
     return;
   }
 
-  const newCase = CaseService.createCase({
+  const newCase = await CaseService.createCase({
     title,
     type,
     jurisdiction: effectiveJurisdiction,
@@ -125,8 +125,8 @@ router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervi
 });
 
 // Get case detail by ID
-router.get('/:id', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  const detail = CaseService.getCaseById(req.params.id as string);
+router.get('/:id', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  const detail = await CaseService.getCaseById(req.params.id as string);
   if (!detail) {
     res.status(404).json({ error: 'Case not found.' });
     return;
@@ -135,7 +135,7 @@ router.get('/:id', authenticateJWT, (req: AuthenticatedRequest, res: Response) =
 });
 
 // Update case status
-router.patch('/:id/status', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'prosecutor', 'judge', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.patch('/:id/status', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'prosecutor', 'judge', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   const { status } = req.body;
   const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
 
@@ -144,7 +144,7 @@ router.patch('/:id/status', authenticateJWT, requireRoles('investigating_officer
     return;
   }
 
-  const updated = CaseService.updateCaseStatus(req.params.id as string, status, {
+  const updated = await CaseService.updateCaseStatus(req.params.id as string, status, {
     id: req.user!.id,
     name: req.user!.name,
     role: req.user!.role,
@@ -160,7 +160,7 @@ router.patch('/:id/status', authenticateJWT, requireRoles('investigating_officer
 });
 
 // Toggle Legal Hold (Supervisor, Prosecutor, Judge, Admin)
-router.patch('/:id/legal-hold', authenticateJWT, requireRoles('supervisor', 'prosecutor', 'judge', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.patch('/:id/legal-hold', authenticateJWT, requireRoles('supervisor', 'prosecutor', 'judge', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   const { isLegalHold } = req.body;
   const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
 
@@ -169,7 +169,7 @@ router.patch('/:id/legal-hold', authenticateJWT, requireRoles('supervisor', 'pro
     return;
   }
 
-  const updated = CaseService.toggleLegalHold(req.params.id as string, isLegalHold, {
+  const updated = await CaseService.toggleLegalHold(req.params.id as string, isLegalHold, {
     id: req.user!.id,
     name: req.user!.name,
     role: req.user!.role,
@@ -185,9 +185,9 @@ router.patch('/:id/legal-hold', authenticateJWT, requireRoles('supervisor', 'pro
 });
 
 // FEATURE 1: Comprehensive Evidence & Investigation Timeline
-router.get('/:id/timeline', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.get('/:id/timeline', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const timeline = CaseService.getComprehensiveTimeline(req.params.id as string);
+    const timeline = await CaseService.getComprehensiveTimeline(req.params.id as string);
     res.json(timeline);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -195,9 +195,9 @@ router.get('/:id/timeline', authenticateJWT, (req: AuthenticatedRequest, res: Re
 });
 
 // FEATURE 4: Case Completeness / Readiness Evaluation
-router.get('/:id/readiness', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.get('/:id/readiness', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const report = CaseService.calculateCaseReadiness(req.params.id as string);
+    const report = await CaseService.calculateCaseReadiness(req.params.id as string);
     res.json(report);
   } catch (err: any) {
     res.status(404).json({ error: err.message });
@@ -234,9 +234,9 @@ router.post('/:id/export-package', authenticateJWT, async (req: AuthenticatedReq
 });
 
 // FEATURE 10: Investigation Summary (Statutory Source Citations)
-router.get('/:id/investigation-summary', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.get('/:id/investigation-summary', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const summary = CaseService.generateInvestigationSummary(req.params.id as string);
+    const summary = await CaseService.generateInvestigationSummary(req.params.id as string);
     res.json(summary);
   } catch (err: any) {
     res.status(404).json({ error: err.message });

@@ -1,11 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import path from 'path';
 import fs from 'fs';
 import { config } from './config/index.js';
-import { db } from './db/database.js';
-import { seedDatabase } from './db/seed.js';
+import { PostgresService } from './db/postgres.js';
 import { rateLimiter } from './middleware/rateLimiter.js';
 import { errorHandler } from './middleware/errorHandler.js';
 
@@ -49,19 +47,6 @@ if (!fs.existsSync(config.storageDir)) {
   fs.mkdirSync(config.storageDir, { recursive: true });
 }
 
-import { loadDatasetsFromCSV } from './db/csvLoader.js';
-
-// Auto-seed if empty database or only mock demo cases
-if (db.users.length === 0) {
-  console.log('[SYSTEM] Empty database detected. Auto-seeding initial dataset...');
-  seedDatabase()
-    .then(() => loadDatasetsFromCSV().catch(err => console.log('[CSV-LOAD] Note:', err.message)))
-    .catch(err => console.error('[SEED-ERROR]', err));
-} else if (db.cases.length < 50) {
-  console.log('[SYSTEM] Auto-ingesting official CSV datasets into database...');
-  loadDatasetsFromCSV().catch(err => console.log('[CSV-LOAD] Note:', err.message));
-}
-
 // API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/cases', caseRoutes);
@@ -77,17 +62,53 @@ app.use('/api/intelligence', intelligenceRoutes);
 app.use('/api/search', searchRoutes);
 app.use('/api/notifications', notificationRoutes);
 
-
 // Error Handler
 app.use(errorHandler);
 
-const server = app.listen(config.port, () => {
-  console.log(`=======================================================`);
-  console.log(`  NyayaSetu Backend Server Active`);
-  console.log(`  Agency: Ministry of Home Affairs / NCRB`);
-  console.log(`  Listening on: http://localhost:${config.port}`);
-  console.log(`  Storage Directory: ${config.storageDir}`);
-  console.log(`=======================================================`);
-});
+/**
+ * Institutional Startup Workflow:
+ * FAIL-STOP POLICY: If PostgreSQL is unreachable, immediately abort process.
+ * Zero-fallback: No reading or writing database.json during runtime.
+ */
+async function startServer() {
+  console.log('[NyayaSetu] Bootstrapping institutional backend...');
+  console.log('[NyayaSetu] Verifying authoritative PostgreSQL connection...');
 
-export { app, server };
+  const conn = await PostgresService.testConnection();
+  if (!conn.connected) {
+    console.error(`\n=======================================================`);
+    console.error(`[FATAL] CRITICAL STARTUP FAILURE: PostgreSQL is unreachable.`);
+    console.error(`Details: ${conn.error}`);
+    console.error(`PostgreSQL is the mandatory authoritative Single Source of Truth.`);
+    console.error(`The application is configured with ZERO-FALLBACK policy.`);
+    console.error(`Halting server boot immediately (exit code 1).`);
+    console.error(`=======================================================\n`);
+    process.exit(1);
+  }
+
+  console.log(`[NyayaSetu] Connected to PostgreSQL ${conn.version} (database: ${conn.database})`);
+
+  // Ensure database schema is initialized
+  await PostgresService.ensureDatabaseExists().catch(() => {});
+  const schemaInit = await PostgresService.initializeSchema();
+  if (!schemaInit.success) {
+    console.error(`[FATAL] Failed to verify schema in PostgreSQL: ${schemaInit.error}`);
+    process.exit(1);
+  }
+
+  const server = app.listen(config.port, () => {
+    console.log(`=======================================================`);
+    console.log(`  NyayaSetu Backend Server Active (PostgreSQL-Only Mode)`);
+    console.log(`  Authoritative Store: PostgreSQL 16 (${conn.database})`);
+    console.log(`  Zero-Fallback Mode: ACTIVE (database.json reads/writes DISABLED)`);
+    console.log(`  Agency: Ministry of Home Affairs / NCRB`);
+    console.log(`  Listening on: http://localhost:${config.port}`);
+    console.log(`  Storage Directory: ${config.storageDir}`);
+    console.log(`=======================================================`);
+  });
+
+  return server;
+}
+
+const serverPromise = startServer();
+export { app, serverPromise };

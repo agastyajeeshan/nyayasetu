@@ -1,21 +1,24 @@
 import { Router, Response } from 'express';
 import { ShareService } from '../services/shareService.js';
-import { db } from '../db/database.js';
+import { ShareRepository } from '../repositories/shareRepository.js';
 import { authenticateJWT, requireRoles, AuthenticatedRequest } from '../middleware/auth.js';
 
 const router = Router();
 
 // List active shares created by user or all for admin
-router.get('/', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  let list = [...db.share_links];
-  if (req.user!.role !== 'admin') {
-    list = list.filter(s => s.sharedByUserId === req.user!.id);
+router.get('/', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const list = req.user!.role === 'admin'
+      ? await ShareRepository.findAll()
+      : await ShareRepository.findByUserId(req.user!.id);
+    res.json(list);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
-  res.json(list);
 });
 
 // Create expiring share link (IO, Supervisor, Prosecutor, Admin)
-router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'prosecutor', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'prosecutor', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { documentId, caseId, recipientEmail, recipientName, recipientOrg, permission, expiresInHours, passcode, purpose, watermarkText } = req.body;
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
@@ -25,7 +28,7 @@ router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervi
       return;
     }
 
-    const share = ShareService.createShare({
+    const share = await ShareService.createShare({
       documentId,
       caseId,
       recipientEmail,
@@ -50,25 +53,29 @@ router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervi
 });
 
 // Access shared resource via token (Public endpoint with token authentication)
-router.post('/access/:token', (req, res) => {
-  const { passcode } = req.body;
-  const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
-  const ua = req.headers['user-agent'] || 'Unknown';
+router.post('/access/:token', async (req, res) => {
+  try {
+    const { passcode } = req.body;
+    const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
+    const ua = (req.headers['user-agent'] as string) || 'Unknown';
 
-  const result = ShareService.accessSharedResource(req.params.token as string, passcode, ip, ua);
-  if (!result.success) {
-    res.status(403).json({ error: result.error });
-    return;
+    const result = await ShareService.accessSharedResource(req.params.token as string, passcode, ip, ua);
+    if (!result.success) {
+      res.status(403).json({ error: result.error });
+      return;
+    }
+
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.json(result);
 });
 
 // Revoke share link
-router.delete('/:id', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'prosecutor', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.delete('/:id', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'prosecutor', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
-    ShareService.revokeShare(req.params.id as string, {
+    await ShareService.revokeShare(req.params.id as string, {
       id: req.user!.id,
       name: req.user!.name,
       role: req.user!.role,

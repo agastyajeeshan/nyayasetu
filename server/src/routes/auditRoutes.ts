@@ -1,13 +1,13 @@
 import { Router, Response } from 'express';
 import { AuditService } from '../services/auditService.js';
 import { LedgerService } from '../services/ledgerService.js';
-import { db } from '../db/database.js';
+import { LedgerRepository } from '../repositories/ledgerRepository.js';
 import { authenticateJWT, requireRoles, AuthenticatedRequest } from '../middleware/auth.js';
 
 const router = Router();
 
 // Query append-only audit logs (Accessible to all authorized investigation & legal roles)
-router.get('/logs', authenticateJWT, requireRoles('auditor', 'admin', 'supervisor', 'investigating_officer', 'prosecutor', 'judge', 'forensic_officer'), (req: AuthenticatedRequest, res: Response) => {
+router.get('/logs', authenticateJWT, requireRoles('auditor', 'admin', 'supervisor', 'investigating_officer', 'prosecutor', 'judge', 'forensic_officer'), async (req: AuthenticatedRequest, res: Response) => {
   const { 
     actorId, 
     user, 
@@ -28,7 +28,7 @@ router.get('/logs', authenticateJWT, requireRoles('auditor', 'admin', 'superviso
     offset 
   } = req.query as Record<string, string>;
 
-  const result = AuditService.queryLogs({
+  const result = await AuditService.queryLogs({
     actorId,
     user,
     role,
@@ -51,25 +51,30 @@ router.get('/logs', authenticateJWT, requireRoles('auditor', 'admin', 'superviso
 });
 
 // View ledger blocks (Auditor, Admin)
-router.get('/ledger', authenticateJWT, requireRoles('auditor', 'admin', 'supervisor', 'judge'), (req: AuthenticatedRequest, res: Response) => {
+router.get('/ledger', authenticateJWT, requireRoles('auditor', 'admin', 'supervisor', 'judge'), async (req: AuthenticatedRequest, res: Response) => {
+  const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+  const offset = req.query.offset ? parseInt(req.query.offset as string, 10) : 0;
+  const totalBlocks = await LedgerRepository.count();
+  const blocks = await LedgerRepository.getAllBlocks(limit, offset);
   res.json({
-    totalBlocks: db.ledger_blocks.length,
-    blocks: db.ledger_blocks
+    totalBlocks,
+    blocks
   });
 });
 
 // Verify complete ledger integrity (Auditor, Admin)
-router.get('/ledger/verify', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  const result = LedgerService.verifyLedgerIntegrity();
+router.get('/ledger/verify', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  const result = await LedgerService.verifyLedgerIntegrity();
   res.json(result);
 });
 
 // Simulate tampering on a ledger block (for demo evaluation)
-router.post('/ledger/simulate-tamper', authenticateJWT, requireRoles('admin', 'auditor'), (req: AuthenticatedRequest, res: Response) => {
+router.post('/ledger/simulate-tamper', authenticateJWT, requireRoles('admin', 'auditor'), async (req: AuthenticatedRequest, res: Response) => {
   const { blockIndex, fakeField } = req.body;
-  const index = typeof blockIndex === 'number' ? blockIndex : (db.ledger_blocks.length > 1 ? 1 : 0);
+  const total = await LedgerRepository.count();
+  const index = typeof blockIndex === 'number' ? blockIndex : (total > 1 ? 1 : 0);
   
-  const success = LedgerService.simulateTamper(index, {
+  const success = await LedgerService.simulateTamper(index, {
     unauthorizedModification: fakeField || 'FORGED_AUTHORIZATION_RECORD_SIMULATED',
     tamperedBy: req.user!.name
   });
@@ -87,9 +92,9 @@ router.post('/ledger/simulate-tamper', authenticateJWT, requireRoles('admin', 'a
 });
 
 // Repair ledger
-router.post('/ledger/repair', authenticateJWT, requireRoles('admin', 'auditor'), (req: AuthenticatedRequest, res: Response) => {
-  LedgerService.repairLedger();
-  const verify = LedgerService.verifyLedgerIntegrity();
+router.post('/ledger/repair', authenticateJWT, requireRoles('admin', 'auditor'), async (req: AuthenticatedRequest, res: Response) => {
+  await LedgerService.repairLedger();
+  const verify = await LedgerService.verifyLedgerIntegrity();
   res.json({
     success: true,
     message: 'Ledger integrity verified and repaired.',

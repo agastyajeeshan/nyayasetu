@@ -6,14 +6,14 @@ import { EvidenceType } from '../types/index.js';
 const router = Router();
 
 // List evidence
-router.get('/', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.get('/', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   const { caseId, type, search } = req.query as Record<string, string>;
-  const list = EvidenceService.listEvidence({ caseId, type, search });
+  const list = await EvidenceService.listEvidence({ caseId, type, search });
   res.json(list);
 });
 
 // Register new evidence (IO, Forensic Officer, Supervisor, Admin)
-router.post('/', authenticateJWT, requireRoles('investigating_officer', 'forensic_officer', 'supervisor', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.post('/', authenticateJWT, requireRoles('investigating_officer', 'forensic_officer', 'supervisor', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { caseId, type, description, collectionLocation, collectionTimestamp, storageLocker, handlingNotes, rawSampleOrDigest, linkedDocumentIds } = req.body;
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
@@ -23,7 +23,7 @@ router.post('/', authenticateJWT, requireRoles('investigating_officer', 'forensi
       return;
     }
 
-    const item = EvidenceService.createEvidence({
+    const item = await EvidenceService.createEvidence({
       caseId,
       type: type as EvidenceType,
       description,
@@ -47,8 +47,8 @@ router.post('/', authenticateJWT, requireRoles('investigating_officer', 'forensi
 });
 
 // Get evidence detail with custody history
-router.get('/:id', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  const detail = EvidenceService.getEvidenceDetail(req.params.id as string);
+router.get('/:id', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  const detail = await EvidenceService.getEvidenceDetail(req.params.id as string);
   if (!detail) {
     res.status(404).json({ error: 'Evidence item not found.' });
     return;
@@ -57,7 +57,7 @@ router.get('/:id', authenticateJWT, (req: AuthenticatedRequest, res: Response) =
 });
 
 // Transfer custody (IO, Forensic Officer, Supervisor, Court, Admin)
-router.post('/:id/transfer', authenticateJWT, requireRoles('investigating_officer', 'forensic_officer', 'supervisor', 'judge', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.post('/:id/transfer', authenticateJWT, requireRoles('investigating_officer', 'forensic_officer', 'supervisor', 'judge', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { toCustodian, toLocation, reason, notes } = req.body;
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
@@ -67,7 +67,7 @@ router.post('/:id/transfer', authenticateJWT, requireRoles('investigating_office
       return;
     }
 
-    const event = EvidenceService.transferCustody({
+    const event = await EvidenceService.transferCustody({
       evidenceId: req.params.id as string,
       toCustodian,
       toLocation,

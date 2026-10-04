@@ -1,21 +1,22 @@
-import crypto from 'crypto';
-import { db } from '../db/database.js';
-import { CrossCaseCorrelation, GraphNode, GraphEdge, DiscrepancyReport } from '../types/index.js';
+import { CaseRepository } from '../repositories/caseRepository.js';
+import { DocumentRepository } from '../repositories/documentRepository.js';
+import { EvidenceRepository } from '../repositories/evidenceRepository.js';
+import { PersonRepository } from '../repositories/personRepository.js';
+import { CrossCaseCorrelation, GraphNode, GraphEdge } from '../types/index.js';
 
 export class IntelligenceService {
   /**
-   * Scans the database and finds multi-case cross-document correlations
+   * Scans PostgreSQL and finds multi-case cross-document correlations
    */
-  public static getCorrelations(): CrossCaseCorrelation[] {
+  public static async getCorrelations(): Promise<CrossCaseCorrelation[]> {
     const correlations: CrossCaseCorrelation[] = [];
-    const cases = db.cases;
-    const documents = db.documents;
-    const evidence = db.evidence_items;
-    const persons = db.persons;
+    const cases = await CaseRepository.findAll({ limit: 100 });
+    const evidence = await EvidenceRepository.findAll({ limit: 100 });
+    const persons = await PersonRepository.findMany({ limit: 100 });
 
     // 1. Correlate Persons across cases
     persons.forEach(person => {
-      if (person.linkedCases.length > 1) {
+      if (person.linkedCases && person.linkedCases.length > 1) {
         const caseIds = person.linkedCases.map(c => c.caseId);
         const caseNums = person.linkedCases.map(c => c.caseNumber);
         
@@ -36,7 +37,7 @@ export class IntelligenceService {
     const vehicleRegex = /\b([A-Z]{2}[-\s]?\d{1,2}[-\s]?[A-Z]{1,3}[-\s]?\d{4})\b/gi;
     const vehicleMap = new Map<string, { caseIds: string[]; caseNums: string[]; snippets: string[] }>();
 
-    cases.forEach(c => {
+    cases.forEach((c: any) => {
       const textToSearch = `${c.title} ${c.summary} ${c.propertiesStolenOrInvolved || ''} ${c.firContents || ''}`;
       const matches = textToSearch.match(vehicleRegex);
       if (matches) {
@@ -72,7 +73,7 @@ export class IntelligenceService {
 
     // 3. Correlate Ballistics / Weapon Types across Evidence
     const weaponMap = new Map<string, { caseIds: string[]; caseNums: string[]; evidenceNums: string[] }>();
-    evidence.filter(e => e.type === 'Physical Weapon' || e.type === 'Ballistic').forEach(ev => {
+    evidence.filter((e: any) => e.type === 'Physical Weapon' || e.type === 'Ballistic').forEach((ev: any) => {
       const key = ev.description.toLowerCase().includes('glock') ? 'Glock 9mm Semi-Automatic Pistol'
         : ev.description.toLowerCase().includes('country-made') || ev.description.toLowerCase().includes('desi') ? 'Country-Made .315 Katta / Firearm'
         : ev.description.toLowerCase().includes('knife') ? 'Rambo Serrated Combat Knife'
@@ -104,7 +105,7 @@ export class IntelligenceService {
       }
     });
 
-    // 4. Default high-value intelligence matches for demo completeness
+    // 4. Default high-value intelligence matches for completeness if none found
     if (correlations.length === 0) {
       correlations.push({
         id: 'corr-demo-01',
@@ -143,10 +144,10 @@ export class IntelligenceService {
 
   /**
    * FEATURE 2: Case-Level Entity Relationship View
-   * Constructs an interactive Graph Node-Edge Network across:
+   * Constructs an interactive Graph Node-Edge Network from PostgreSQL across:
    * PERSON, CASE, DOCUMENT, EVIDENCE, LOCATION, EVENT, ORGANIZATION
    */
-  public static getKnowledgeGraph(caseIdFilter?: string): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  public static async getKnowledgeGraph(caseIdFilter?: string): Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }> {
     const nodes: GraphNode[] = [];
     const edges: GraphEdge[] = [];
     const addedNodeIds = new Set<string>();
@@ -164,11 +165,15 @@ export class IntelligenceService {
       }
     };
 
-    const targetCases = caseIdFilter 
-      ? db.cases.filter(c => c.id === caseIdFilter || c.caseNumber === caseIdFilter) 
-      : db.cases.slice(0, 5);
+    let targetCases: any[] = [];
+    if (caseIdFilter) {
+      const found = (await CaseRepository.findById(caseIdFilter)) || (await CaseRepository.findByCaseNumber(caseIdFilter));
+      if (found) targetCases = [found];
+    } else {
+      targetCases = await CaseRepository.findAll({ limit: 5 });
+    }
 
-    targetCases.forEach(c => {
+    for (const c of targetCases) {
       const caseNodeId = `case-${c.id}`;
       
       // 1. Case Node
@@ -185,7 +190,7 @@ export class IntelligenceService {
           station: c.policeStation,
           incidentDate: c.incidentDate,
           ioName: c.investigatingOfficerName,
-          acts: c.actsAndSections?.map(a => `${a.act} ${a.sections}`).join(', ') || c.type
+          acts: c.actsAndSections?.map((a: any) => `${a.act} ${a.sections}`).join(', ') || c.type
         }
       });
 
@@ -234,7 +239,7 @@ export class IntelligenceService {
       }
 
       // 4. Documents of this Case
-      const caseDocs = db.documents.filter(d => d.caseId === c.id && !d.isDeleted);
+      const caseDocs = await DocumentRepository.findByCaseId(c.id);
       caseDocs.forEach(doc => {
         const docNodeId = `doc-${doc.id}`;
         addNode({
@@ -262,8 +267,8 @@ export class IntelligenceService {
       });
 
       // 5. Evidence Exhibits of this Case
-      const caseEvidence = db.evidence_items.filter(e => e.caseId === c.id);
-      caseEvidence.forEach(ev => {
+      const caseEvidence = await EvidenceRepository.findAll({ caseId: c.id });
+      caseEvidence.forEach((ev: any) => {
         const evNodeId = `ev-${ev.id}`;
         addNode({
           id: evNodeId,
@@ -311,7 +316,7 @@ export class IntelligenceService {
         }
 
         // Link Evidence to Documents that reference it
-        ev.linkedDocumentIds.forEach(linkedDocId => {
+        ev.linkedDocumentIds.forEach((linkedDocId: string) => {
           if (addedNodeIds.has(`doc-${linkedDocId}`)) {
             addEdge({
               id: `edge-doc-ev-${linkedDocId}-${ev.id}`,
@@ -325,10 +330,10 @@ export class IntelligenceService {
       });
 
       // 6. Persons linked to this Case
-      const linkedPersons = db.persons.filter(p => p.linkedCases.some(lc => lc.caseId === c.id));
+      const linkedPersons = await PersonRepository.findByCase(c.id);
       linkedPersons.forEach(p => {
         const personNodeId = `person-${p.id}`;
-        const lc = p.linkedCases.find(l => l.caseId === c.id);
+        const lc = p.linkedCases?.find(l => l.caseId === c.id);
         const role = lc?.role || (p.riskRating === 'Critical' || p.riskRating === 'High' ? 'Accused' : 'Witness');
 
         addNode({
@@ -370,7 +375,7 @@ export class IntelligenceService {
 
         // Link Accused Person to Seized Weapons / Exhibits
         if (role === 'Accused' || role === 'Suspect') {
-          caseEvidence.forEach(ev => {
+          caseEvidence.forEach((ev: any) => {
             if (ev.type === 'Physical Weapon' || ev.type === 'Electronic Device' || ev.type === 'Digital') {
               addEdge({
                 id: `edge-p-ev-${p.id}-${ev.id}`,
@@ -410,7 +415,7 @@ export class IntelligenceService {
           type: 'milestone_in'
         });
       });
-    });
+    }
 
     return { nodes, edges };
   }
@@ -420,14 +425,18 @@ export class IntelligenceService {
    * Detects potential conflicts across documents using strictly non-declarative wording:
    * "Potential contradiction detected"
    */
-  public static getDiscrepancies(caseIdFilter?: string): any[] {
+  public static async getDiscrepancies(caseIdFilter?: string): Promise<any[]> {
     const contradictions: any[] = [];
-    const cases = caseIdFilter 
-      ? db.cases.filter(c => c.id === caseIdFilter || c.caseNumber === caseIdFilter)
-      : db.cases.slice(0, 10);
+    let cases: any[] = [];
+    if (caseIdFilter) {
+      const found = (await CaseRepository.findById(caseIdFilter)) || (await CaseRepository.findByCaseNumber(caseIdFilter));
+      if (found) cases = [found];
+    } else {
+      cases = await CaseRepository.findAll({ limit: 10 });
+    }
 
-    cases.forEach(c => {
-      const docs = db.documents.filter(d => d.caseId === c.id && !d.isDeleted);
+    for (const c of cases) {
+      const docs = await DocumentRepository.findByCaseId(c.id);
       const firDoc = docs.find(d => d.category === 'FIR') || docs[0];
       const witnessDocs = docs.filter(d => d.category === 'Witness Statement');
       const forensicDocs = docs.filter(d => d.category === 'Forensic Report');
@@ -519,7 +528,7 @@ export class IntelligenceService {
         status: 'PENDING_REVIEW',
         detectedAt: new Date().toISOString()
       });
-    });
+    }
 
     return contradictions;
   }

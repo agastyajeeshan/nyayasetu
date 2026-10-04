@@ -1,6 +1,7 @@
 import { Router, Response } from 'express';
 import { AuthService } from '../services/authService.js';
-import { db } from '../db/database.js';
+import { UserRepository } from '../repositories/userRepository.js';
+import { AuditRepository } from '../repositories/auditRepository.js';
 import { authenticateJWT, requireRoles, AuthenticatedRequest } from '../middleware/auth.js';
 import { AuditService } from '../services/auditService.js';
 import { UserRole } from '../types/index.js';
@@ -8,7 +9,7 @@ import { UserRole } from '../types/index.js';
 const router = Router();
 
 // Login with Officer ID / Agency ID / Email and password
-router.post('/login', (req, res) => {
+router.post('/login', async (req, res) => {
   const identifier = req.body.identifier || req.body.officerId || req.body.id || req.body.userId || req.body.agencyId;
   const password = req.body.password;
   const enforceMfa = req.body.enforceMfa === true;
@@ -19,10 +20,10 @@ router.post('/login', (req, res) => {
     return;
   }
 
-  const result = AuthService.login(identifier, password, ip, enforceMfa);
+  const result = await AuthService.login(identifier, password, ip, enforceMfa);
 
   if (result.error) {
-    AuditService.log({
+    await AuditService.log({
       actorId: 'UNAUTHENTICATED',
       actorName: identifier,
       actorRole: 'external_stakeholder',
@@ -50,7 +51,7 @@ router.post('/login', (req, res) => {
   }
 
   if (result.auth) {
-    AuditService.log({
+    await AuditService.log({
       actorId: result.auth.user.id,
       actorName: result.auth.user.name,
       actorRole: result.auth.user.role,
@@ -69,7 +70,7 @@ router.post('/login', (req, res) => {
 });
 
 // Verify MFA Challenge
-router.post('/mfa/verify', (req, res) => {
+router.post('/mfa/verify', async (req, res) => {
   const { challengeToken, code } = req.body;
   const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
 
@@ -78,14 +79,14 @@ router.post('/mfa/verify', (req, res) => {
     return;
   }
 
-  const result = AuthService.verifyMfa(challengeToken, code);
+  const result = await AuthService.verifyMfa(challengeToken, code);
   if (result.error) {
     res.status(401).json({ error: result.error });
     return;
   }
 
   if (result.auth) {
-    AuditService.log({
+    await AuditService.log({
       actorId: result.auth.user.id,
       actorName: result.auth.user.name,
       actorRole: result.auth.user.role,
@@ -104,7 +105,7 @@ router.post('/mfa/verify', (req, res) => {
 });
 
 // Demo helper: instant role switcher for quick evaluator exploration
-router.post('/switch-role', (req, res) => {
+router.post('/switch-role', async (req, res) => {
   const { role } = req.body as { role: UserRole };
   const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
 
@@ -113,7 +114,7 @@ router.post('/switch-role', (req, res) => {
     return;
   }
 
-  const result = AuthService.switchRole(role);
+  const result = await AuthService.switchRole(role);
   if (result.error) {
     res.status(404).json({ error: result.error });
     return;
@@ -123,8 +124,8 @@ router.post('/switch-role', (req, res) => {
 });
 
 // Get current user profile
-router.get('/me', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  const user = db.users.find(u => u.id === req.user?.id);
+router.get('/me', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  const user = await UserRepository.findById(req.user?.id || '');
   if (!user) {
     res.status(404).json({ error: 'User not found.' });
     return;
@@ -135,23 +136,24 @@ router.get('/me', authenticateJWT, (req: AuthenticatedRequest, res: Response) =>
 });
 
 // List users (for assignment & admin)
-router.get('/users', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  const users = db.users.map(({ passwordHash, salt, mfaSecret, ...u }) => u);
+router.get('/users', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  const allUsers = await UserRepository.findAll();
+  const users = allUsers.map(({ passwordHash, salt, mfaSecret, ...u }) => u);
   res.json(users);
 });
 
 // Update Profile
-router.patch('/profile', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.patch('/profile', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
-  const result = AuthService.updateProfile(req.user.id, req.body);
+  const result = await AuthService.updateProfile(req.user.id, req.body);
   if (result.error) {
     res.status(400).json({ error: result.error });
     return;
   }
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
@@ -169,7 +171,7 @@ router.patch('/profile', authenticateJWT, (req: AuthenticatedRequest, res: Respo
 });
 
 // Change Password
-router.post('/change-password', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.post('/change-password', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
@@ -182,9 +184,9 @@ router.post('/change-password', authenticateJWT, (req: AuthenticatedRequest, res
     return;
   }
 
-  const result = AuthService.changePassword(req.user.id, currentPassword, newPassword, ip);
+  const result = await AuthService.changePassword(req.user.id, currentPassword, newPassword, ip);
   if (result.error) {
-    AuditService.log({
+    await AuditService.log({
       actorId: req.user.id,
       actorName: req.user.name,
       actorRole: req.user.role,
@@ -202,7 +204,7 @@ router.post('/change-password', authenticateJWT, (req: AuthenticatedRequest, res
     return;
   }
 
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
@@ -220,17 +222,17 @@ router.post('/change-password', authenticateJWT, (req: AuthenticatedRequest, res
 });
 
 // Toggle MFA
-router.post('/mfa/toggle', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.post('/mfa/toggle', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
-  const result = AuthService.toggleMfa(req.user.id, req.body.enabled);
+  const result = await AuthService.toggleMfa(req.user.id, req.body.enabled);
   if (result.error) {
     res.status(400).json({ error: result.error });
     return;
   }
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
@@ -248,18 +250,18 @@ router.post('/mfa/toggle', authenticateJWT, (req: AuthenticatedRequest, res: Res
 });
 
 // Enroll Face Biometric
-router.post('/face/enroll', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.post('/face/enroll', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
   const { templateHash } = req.body;
-  const result = AuthService.enrollFace(req.user.id, templateHash);
+  const result = await AuthService.enrollFace(req.user.id, templateHash);
   if (result.error) {
     res.status(400).json({ error: result.error });
     return;
   }
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
@@ -277,7 +279,7 @@ router.post('/face/enroll', authenticateJWT, (req: AuthenticatedRequest, res: Re
 });
 
 // Remove Face Biometric (requires password re-auth)
-router.delete('/face/remove', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.delete('/face/remove', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
@@ -287,9 +289,9 @@ router.delete('/face/remove', authenticateJWT, (req: AuthenticatedRequest, res: 
     res.status(400).json({ error: 'Password is required to remove biometric credentials.' });
     return;
   }
-  const result = AuthService.removeFace(req.user.id, password);
+  const result = await AuthService.removeFace(req.user.id, password);
   if (result.error) {
-    AuditService.log({
+    await AuditService.log({
       actorId: req.user.id,
       actorName: req.user.name,
       actorRole: req.user.role,
@@ -306,7 +308,7 @@ router.delete('/face/remove', authenticateJWT, (req: AuthenticatedRequest, res: 
     res.status(400).json({ error: result.error });
     return;
   }
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
@@ -324,17 +326,17 @@ router.delete('/face/remove', authenticateJWT, (req: AuthenticatedRequest, res: 
 });
 
 // Face Verification check
-router.post('/face/verify', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.post('/face/verify', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
-  const user = db.users.find(u => u.id === req.user?.id);
+  const user = await UserRepository.findById(req.user?.id || '');
   if (!user || !user.faceEnrolled) {
     res.status(400).json({ error: 'No face verification enrolled for this account.' });
     return;
   }
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
@@ -352,30 +354,27 @@ router.post('/face/verify', authenticateJWT, (req: AuthenticatedRequest, res: Re
 });
 
 // Update Notification Preferences
-router.patch('/notification-preferences', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.patch('/notification-preferences', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
-  const result = AuthService.updateNotificationPreferences(req.user.id, req.body);
+  const result = await AuthService.updateNotificationPreferences(req.user.id, req.body);
   res.json(result);
 });
 
 // Get Session & Security Info
-router.get('/session-info', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.get('/session-info', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
-  const user = db.users.find(u => u.id === req.user?.id);
+  const user = await UserRepository.findById(req.user?.id || '');
   const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
   const userAgent = req.headers['user-agent'] || 'Unknown workstation';
 
   // Fetch recent security/auth audit events for this user
-  const securityLogs = db.audit_events
-    .filter(evt => evt.actorId === req.user?.id || (evt.resourceType === 'AUTH' && evt.resourceId === req.user?.id) || evt.details.includes(req.user?.name || ''))
-    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-    .slice(0, 10);
+  const securityLogs = await AuditRepository.findRecentForUser(req.user.id, req.user.name, 10);
 
   res.json({
     currentSession: {
@@ -391,12 +390,12 @@ router.get('/session-info', authenticateJWT, (req: AuthenticatedRequest, res: Re
 });
 
 // Sign Out Other Sessions
-router.post('/sessions/revoke-others', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.post('/sessions/revoke-others', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
   }
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
@@ -414,7 +413,7 @@ router.post('/sessions/revoke-others', authenticateJWT, (req: AuthenticatedReque
 });
 
 // Deactivate Account (requires password)
-router.post('/deactivate', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
+router.post('/deactivate', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
   if (!req.user) {
     res.status(401).json({ error: 'Unauthorized' });
     return;
@@ -424,12 +423,12 @@ router.post('/deactivate', authenticateJWT, (req: AuthenticatedRequest, res: Res
     res.status(400).json({ error: 'Password confirmation is required.' });
     return;
   }
-  const result = AuthService.deactivateAccount(req.user.id, password);
+  const result = await AuthService.deactivateAccount(req.user.id, password);
   if (result.error) {
     res.status(400).json({ error: result.error });
     return;
   }
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
@@ -447,19 +446,19 @@ router.post('/deactivate', authenticateJWT, (req: AuthenticatedRequest, res: Res
 });
 
 // Admin: Update User Status (Activate/Deactivate)
-router.patch('/users/:id/status', authenticateJWT, requireRoles('admin', 'supervisor'), (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+router.patch('/users/:id/status', authenticateJWT, requireRoles('admin', 'supervisor'), async (req: AuthenticatedRequest, res: Response) => {
+  const id = req.params.id as string;
   const { isActive } = req.body;
   if (isActive === undefined) {
     res.status(400).json({ error: 'isActive status is required.' });
     return;
   }
-  const result = AuthService.updateUserStatus(id, Boolean(isActive));
+  const result = await AuthService.updateUserStatus(id, Boolean(isActive));
   if (result.error) {
     res.status(404).json({ error: result.error });
     return;
   }
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user?.id || 'ADMIN',
     actorName: req.user?.name || 'Administrator',
     actorRole: req.user?.role || 'admin',
@@ -477,19 +476,19 @@ router.patch('/users/:id/status', authenticateJWT, requireRoles('admin', 'superv
 });
 
 // Admin: Update User Role
-router.patch('/users/:id/role', authenticateJWT, requireRoles('admin'), (req: AuthenticatedRequest, res: Response) => {
-  const { id } = req.params;
+router.patch('/users/:id/role', authenticateJWT, requireRoles('admin'), async (req: AuthenticatedRequest, res: Response) => {
+  const id = req.params.id as string;
   const { role } = req.body;
   if (!role) {
     res.status(400).json({ error: 'Target role is required.' });
     return;
   }
-  const result = AuthService.updateUserRole(id, role);
+  const result = await AuthService.updateUserRole(id, role);
   if (result.error) {
     res.status(404).json({ error: result.error });
     return;
   }
-  AuditService.log({
+  await AuditService.log({
     actorId: req.user?.id || 'ADMIN',
     actorName: req.user?.name || 'Administrator',
     actorRole: req.user?.role || 'admin',

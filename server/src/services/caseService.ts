@@ -1,12 +1,21 @@
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/database.js';
+import { 
+  CaseRepository, 
+  UserRepository, 
+  DocumentRepository, 
+  EvidenceRepository, 
+  CustodyRepository, 
+  SignatureRepository, 
+  AuditRepository, 
+  PersonRepository, 
+  AIAnalysisRepository 
+} from '../repositories/index.js';
 import { 
   Case, 
   CaseStatus, 
   CasePriority, 
   UserRole,
   TimelineEventItem,
-  TimelineEventType,
   CaseReadinessReport,
   ReadinessCheckItem,
   EvidencePackageOptions
@@ -86,24 +95,25 @@ export class CaseService {
   /**
    * Generates next sequential Case Number (e.g. FIR-2026-CRB-104)
    */
-  private static generateCaseNumber(dept: string): string {
+  private static async generateCaseNumber(dept: string): Promise<string> {
     const year = new Date().getFullYear();
     const prefix = dept.includes('Crime') ? 'CRB' : dept.includes('Cyber') ? 'CYB' : 'FIR';
-    const count = db.cases.length + 101;
+    const count = (await CaseRepository.count()) + 101;
     return `${prefix}-${year}-${count}`;
   }
 
   /**
-   * Creates a new investigation case
+   * Creates a new investigation case in PostgreSQL
    */
-  public static createCase(params: CreateCaseParams): Case {
-    const ioUser = db.users.find(u => u.id === params.investigatingOfficerId);
+  public static async createCase(params: CreateCaseParams): Promise<Case> {
+    const ioUser = await UserRepository.findById(params.investigatingOfficerId);
     const ioName = ioUser ? ioUser.name : params.actorName;
     const year = params.firYear || new Date().getFullYear();
+    const caseNumber = await this.generateCaseNumber(params.department);
 
     const newCase: Case = {
       id: `CAS-${Date.now()}-${uuidv4().slice(0, 6)}`,
-      caseNumber: this.generateCaseNumber(params.department),
+      caseNumber,
       title: params.title,
       type: params.type,
       jurisdiction: params.jurisdiction,
@@ -160,10 +170,9 @@ export class CaseService {
       updatedAt: new Date().toISOString()
     };
 
-    db.cases.unshift(newCase);
-    db.save();
+    await CaseRepository.create(newCase);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: params.actorId,
       actorName: params.actorName,
       actorRole: params.actorRole,
@@ -182,19 +191,20 @@ export class CaseService {
   }
 
   /**
-   * Retrieves cases filtered by user permissions and query parameters
+   * Retrieves cases filtered by user permissions and query parameters from PostgreSQL
    */
-  public static getCases(user: { id: string; role: UserRole; department: string; jurisdiction: string }, filters: {
+  public static async getCases(user: { id: string; role: UserRole; department: string; jurisdiction: string }, filters: {
     status?: string;
     priority?: string;
     search?: string;
-  }): Case[] {
-    let list = [...db.cases];
+  }): Promise<Case[]> {
+    let list = await CaseRepository.findMany({
+      status: filters.status,
+      priority: filters.priority,
+      search: filters.search
+    });
 
-    // Resource-level authorization:
-    // - Admin, Auditor: See all cases
-    // - IO: See assigned cases or station cases
-    // - Supervisor, Prosecutor, Judge: See cases in their jurisdiction or department
+    // Resource-level authorization
     if (user.role === 'investigating_officer') {
       list = list.filter(c => 
         c.investigatingOfficerId === user.id || 
@@ -221,40 +231,23 @@ export class CaseService {
       );
     }
 
-    if (filters.status) {
-      list = list.filter(c => c.status === filters.status);
-    }
-    if (filters.priority) {
-      list = list.filter(c => c.priority === filters.priority);
-    }
-    if (filters.search) {
-      const q = filters.search.toLowerCase();
-      list = list.filter(c =>
-        c.caseNumber.toLowerCase().includes(q) ||
-        c.title.toLowerCase().includes(q) ||
-        c.type.toLowerCase().includes(q) ||
-        c.investigatingOfficerName.toLowerCase().includes(q) ||
-        c.policeStation.toLowerCase().includes(q)
-      );
-    }
-
     return list;
   }
 
   /**
-   * Retrieves case by ID with related documents and evidence
+   * Retrieves case by ID with related documents and evidence from PostgreSQL
    */
-  public static getCaseById(caseId: string): {
+  public static async getCaseById(caseId: string): Promise<{
     caseItem: Case;
     documents: any[];
     evidence: any[];
     timeline: CaseTimelineItem[];
-  } | null {
-    const caseItem = db.cases.find(c => c.id === caseId || c.caseNumber === caseId);
+  } | null> {
+    const caseItem = await CaseRepository.findById(caseId) || await CaseRepository.findByCaseNumber(caseId);
     if (!caseItem) return null;
 
-    const documents = db.documents.filter(d => d.caseId === caseItem.id && !d.isDeleted);
-    const evidence = db.evidence_items.filter(e => e.caseId === caseItem.id);
+    const documents = await DocumentRepository.findByCaseId(caseItem.id, false);
+    const evidence = await EvidenceRepository.findByCaseId(caseItem.id);
 
     // Compile comprehensive timeline
     const timeline: CaseTimelineItem[] = [];
@@ -273,7 +266,7 @@ export class CaseService {
     });
 
     // Documents
-    documents.forEach(doc => {
+    for (const doc of documents) {
       timeline.push({
         id: `TL-DOC-${doc.id}`,
         timestamp: doc.createdAt,
@@ -285,11 +278,12 @@ export class CaseService {
         resourceId: doc.id,
         badgeType: 'green'
       });
-    });
+    }
 
     // Custody events
-    evidence.forEach(ev => {
-      const history = db.custody_events.filter(ce => ce.evidenceId === ev.id);
+    for (const ev of evidence) {
+      const history = await CustodyRepository.findByEvidenceId(ev.id);
+      ev.custodyHistory = history;
       history.forEach(ce => {
         timeline.push({
           id: `TL-CUST-${ce.id}`,
@@ -304,27 +298,27 @@ export class CaseService {
           hashProof: ce.hashProof
         });
       });
-    });
+    }
 
     // Signatures
-    const signatures = db.digital_signatures.filter(ds => 
-      documents.some(d => d.id === ds.documentId)
-    );
-    signatures.forEach(sig => {
-      const doc = documents.find(d => d.id === sig.documentId);
-      timeline.push({
-        id: `TL-SIG-${sig.id}`,
-        timestamp: sig.signatureTimestamp,
-        type: 'SIGNATURE',
-        title: `Digitally Signed: ${doc ? doc.title : 'Document'}`,
-        description: `Officer ${sig.signerName} (${sig.signerRole}) cryptographically signed version v${sig.versionNumber}`,
-        actorName: sig.signerName,
-        actorRole: sig.signerRole,
-        resourceId: sig.documentId,
-        badgeType: 'amber',
-        hashProof: sig.versionHash
+    for (const doc of documents) {
+      const sigs = await SignatureRepository.findByDocId(doc.id);
+      doc.signatures = sigs;
+      sigs.forEach(sig => {
+        timeline.push({
+          id: `TL-SIG-${sig.id}`,
+          timestamp: sig.signatureTimestamp,
+          type: 'SIGNATURE',
+          title: `Digitally Signed: ${doc.title}`,
+          description: `Officer ${sig.signerName} (${sig.signerRole}) cryptographically signed version v${sig.versionNumber}`,
+          actorName: sig.signerName,
+          actorRole: sig.signerRole,
+          resourceId: sig.documentId,
+          badgeType: 'amber',
+          hashProof: sig.versionHash
+        });
       });
-    });
+    }
 
     // Sort descending by timestamp
     timeline.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
@@ -338,18 +332,16 @@ export class CaseService {
   }
 
   /**
-   * Updates case status
+   * Updates case status in PostgreSQL
    */
-  public static updateCaseStatus(caseId: string, status: CaseStatus, actor: { id: string; name: string; role: UserRole; ip: string }): Case | null {
-    const caseItem = db.cases.find(c => c.id === caseId);
+  public static async updateCaseStatus(caseId: string, status: CaseStatus, actor: { id: string; name: string; role: UserRole; ip: string }): Promise<Case | null> {
+    const caseItem = await CaseRepository.findById(caseId);
     if (!caseItem) return null;
 
     const oldStatus = caseItem.status;
-    caseItem.status = status;
-    caseItem.updatedAt = new Date().toISOString();
-    db.save();
+    const updated = await CaseRepository.update(caseId, { status });
 
-    AuditService.log({
+    await AuditService.log({
       actorId: actor.id,
       actorName: actor.name,
       actorRole: actor.role,
@@ -364,28 +356,27 @@ export class CaseService {
       ipAddress: actor.ip
     });
 
-    return caseItem;
+    return updated;
   }
 
   /**
-   * Toggles Legal Hold status
+   * Toggles Legal Hold status in PostgreSQL
    */
-  public static toggleLegalHold(caseId: string, isLegalHold: boolean, actor: { id: string; name: string; role: UserRole; ip: string }): Case | null {
-    const caseItem = db.cases.find(c => c.id === caseId);
+  public static async toggleLegalHold(caseId: string, isLegalHold: boolean, actor: { id: string; name: string; role: UserRole; ip: string }): Promise<Case | null> {
+    const caseItem = await CaseRepository.findById(caseId);
     if (!caseItem) return null;
 
-    caseItem.isLegalHold = isLegalHold;
-    caseItem.updatedAt = new Date().toISOString();
+    await CaseRepository.setLegalHold(caseId, isLegalHold);
 
     // Propagate to all child documents
-    db.documents.filter(d => d.caseId === caseItem.id).forEach(d => {
-      d.isLegalHold = isLegalHold;
-      d.updatedAt = new Date().toISOString();
-    });
+    const childDocs = await DocumentRepository.findByCaseId(caseItem.id, true);
+    for (const d of childDocs) {
+      await DocumentRepository.setLegalHold(d.id, isLegalHold);
+    }
 
-    db.save();
+    const updated = await CaseRepository.findById(caseId);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: actor.id,
       actorName: actor.name,
       actorRole: actor.role,
@@ -400,20 +391,20 @@ export class CaseService {
       ipAddress: actor.ip
     });
 
-    return caseItem;
+    return updated;
   }
 
   /**
    * FEATURE 1: Comprehensive Evidence & Investigation Timeline
-   * Combines all 9 real event streams chronologically
+   * Combines all real event streams chronologically from PostgreSQL
    */
-  public static getComprehensiveTimeline(caseId: string): TimelineEventItem[] {
-    const caseItem = db.cases.find(c => c.id === caseId || c.caseNumber === caseId);
+  public static async getComprehensiveTimeline(caseId: string): Promise<TimelineEventItem[]> {
+    const caseItem = await CaseRepository.findById(caseId) || await CaseRepository.findByCaseNumber(caseId);
     if (!caseItem) return [];
 
-    const documents = db.documents.filter(d => d.caseId === caseItem.id && !d.isDeleted);
+    const documents = await DocumentRepository.findByCaseId(caseItem.id, false);
     const docIds = new Set(documents.map(d => d.id));
-    const evidence = db.evidence_items.filter(e => e.caseId === caseItem.id);
+    const evidence = await EvidenceRepository.findByCaseId(caseItem.id);
     const evIds = new Set(evidence.map(e => e.id));
 
     const timeline: TimelineEventItem[] = [];
@@ -489,10 +480,9 @@ export class CaseService {
     });
 
     // 3. Document Uploads and Version Changes
-    documents.forEach(doc => {
-      const versions = db.document_versions
-        .filter(v => v.documentId === doc.id)
-        .sort((a, b) => a.versionNumber - b.versionNumber);
+    for (const doc of documents) {
+      const versions = await DocumentRepository.findVersionsByDocId(doc.id);
+      versions.sort((a, b) => a.versionNumber - b.versionNumber);
 
       versions.forEach(ver => {
         if (ver.versionNumber === 1) {
@@ -545,10 +535,10 @@ export class CaseService {
           });
         }
       });
-    });
+    }
 
     // 4. Evidence Registrations & Seizures
-    evidence.forEach(ev => {
+    for (const ev of evidence) {
       const regTs = ev.collectionTimestamp || ev.createdAt;
       timeline.push({
         id: `TL-EVD-${ev.id}`,
@@ -575,9 +565,9 @@ export class CaseService {
       });
 
       // 5. Custody Transfers for this evidence
-      const custody = db.custody_events.filter(ce => ce.evidenceId === ev.id);
+      const custody = await CustodyRepository.findByEvidenceId(ev.id);
       custody.forEach(ce => {
-        if (ce.eventType !== 'COLLECTION') { // skip initial collection since covered in registration
+        if (ce.eventType !== 'COLLECTION') {
           timeline.push({
             id: `TL-CUST-${ce.id}`,
             timestamp: ce.timestamp,
@@ -603,45 +593,40 @@ export class CaseService {
           });
         }
       });
-    });
+    }
 
     // 6. Digital Signatures applied on case documents
-    const signatures = db.digital_signatures.filter(s => docIds.has(s.documentId));
-    signatures.forEach(sig => {
-      const doc = documents.find(d => d.id === sig.documentId);
-      timeline.push({
-        id: `TL-SIG-${sig.id}`,
-        timestamp: sig.signatureTimestamp,
-        dateFormatted: formatDate(sig.signatureTimestamp),
-        timeFormatted: formatTime(sig.signatureTimestamp),
-        eventType: 'DIGITAL_SIGNATURE',
-        title: `Digital Signature: ${sig.signerName}`,
-        description: `Cryptographically signed version v${sig.versionNumber} of ${doc ? doc.title : 'document'} using ${sig.signatureAlgorithm}. Status: ${sig.verificationStatus}`,
-        actor: {
-          id: sig.signerId,
-          name: sig.signerName,
-          role: sig.signerRole
-        },
-        relatedEntity: {
-          type: 'DOCUMENT',
-          id: sig.documentId,
-          name: doc ? doc.title : 'Document'
-        },
-        integrityStatus: 'VERIFIED',
-        hashProof: sig.versionHash,
-        badgeType: 'green'
+    for (const doc of documents) {
+      const sigs = await SignatureRepository.findByDocId(doc.id);
+      sigs.forEach(sig => {
+        timeline.push({
+          id: `TL-SIG-${sig.id}`,
+          timestamp: sig.signatureTimestamp,
+          dateFormatted: formatDate(sig.signatureTimestamp),
+          timeFormatted: formatTime(sig.signatureTimestamp),
+          eventType: 'DIGITAL_SIGNATURE',
+          title: `Digital Signature: ${sig.signerName}`,
+          description: `Cryptographically signed version v${sig.versionNumber} of ${doc.title} using ${sig.signatureAlgorithm}. Status: ${sig.verificationStatus}`,
+          actor: {
+            id: sig.signerId,
+            name: sig.signerName,
+            role: sig.signerRole
+          },
+          relatedEntity: {
+            type: 'DOCUMENT',
+            id: sig.documentId,
+            name: doc.title
+          },
+          integrityStatus: 'VERIFIED',
+          hashProof: sig.versionHash,
+          badgeType: 'green'
+        });
       });
-    });
+    }
 
     // 7. Audit Events: Document Access & Verification for this case
-    const relevantAuditLogs = db.audit_events.filter(l => 
-      l.resourceId === caseItem.id ||
-      docIds.has(l.resourceId) ||
-      evIds.has(l.resourceId) ||
-      (l.details && l.details.includes(caseItem.caseNumber))
-    );
-
-    relevantAuditLogs.forEach(l => {
+    const auditRes = await AuditRepository.queryLogs({ caseId: caseItem.id, limit: 100 });
+    auditRes.logs.forEach(l => {
       if (l.action.includes('ACCESS') || l.action.includes('DOWNLOAD') || l.action.includes('VIEW') || l.action.includes('PREVIEW')) {
         timeline.push({
           id: `TL-AUD-ACC-${l.id}`,
@@ -692,8 +677,8 @@ export class CaseService {
     });
 
     // 8. Extracted Investigation Events from AI Analyses
-    documents.forEach(doc => {
-      const analysis = db.ai_analyses.find(a => a.documentId === doc.id);
+    for (const doc of documents) {
+      const analysis = await AIAnalysisRepository.findByDocId(doc.id);
       if (analysis && analysis.timelineEvents) {
         analysis.timelineEvents.forEach((ev, idx) => {
           let eventTs = caseItem.incidentDate;
@@ -726,9 +711,9 @@ export class CaseService {
           });
         });
       }
-    });
+    }
 
-    // Sort chronologically descending (newest first)
+    // Sort chronologically descending
     timeline.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
     return timeline;
@@ -736,22 +721,30 @@ export class CaseService {
 
   /**
    * FEATURE 4: Case Completeness / Readiness Engine
-   * Evaluates real case data against the 10 statutory standards
+   * Evaluates real case data against the 10 statutory standards from PostgreSQL
    */
-  public static calculateCaseReadiness(caseId: string): CaseReadinessReport {
-    const caseItem = db.cases.find(c => c.id === caseId || c.caseNumber === caseId);
+  public static async calculateCaseReadiness(caseId: string): Promise<CaseReadinessReport> {
+    const caseItem = await CaseRepository.findById(caseId) || await CaseRepository.findByCaseNumber(caseId);
     if (!caseItem) throw new Error(`Case '${caseId}' not found.`);
 
-    const documents = db.documents.filter(d => d.caseId === caseItem.id && !d.isDeleted);
+    const documents = await DocumentRepository.findByCaseId(caseItem.id, false);
     const docIds = new Set(documents.map(d => d.id));
-    const evidence = db.evidence_items.filter(e => e.caseId === caseItem.id);
-    const signatures = db.digital_signatures.filter(s => docIds.has(s.documentId));
-    const custodyEvents = db.custody_events.filter(ce => evidence.some(e => e.id === ce.evidenceId));
-    const auditLogs = db.audit_events.filter(l => 
-      l.resourceId === caseItem.id ||
-      docIds.has(l.resourceId) ||
-      (l.details && l.details.includes(caseItem.caseNumber))
-    );
+    const evidence = await EvidenceRepository.findByCaseId(caseItem.id);
+
+    const signatures: any[] = [];
+    for (const doc of documents) {
+      const sigs = await SignatureRepository.findByDocId(doc.id);
+      signatures.push(...sigs);
+    }
+
+    const custodyEvents: any[] = [];
+    for (const ev of evidence) {
+      const cust = await CustodyRepository.findByEvidenceId(ev.id);
+      custodyEvents.push(...cust);
+    }
+
+    const auditRes = await AuditRepository.queryLogs({ caseId: caseItem.id, limit: 100 });
+    const auditLogs = auditRes.logs;
 
     const checks: ReadinessCheckItem[] = [];
 
@@ -837,7 +830,7 @@ export class CaseService {
       navigationTarget: { tab: 'documents', action: 'sign' }
     });
 
-    // 7. Required Certificates (Section 65B BSA Certificate for electronic evidence)
+    // 7. Required Certificates
     const hasDigitalEvidence = evidence.some(e => e.type === 'Digital' || e.type === 'Electronic Device');
     const hasSec65BCert = documents.some(d => 
       d.title.toLowerCase().includes('65b') || 
@@ -857,7 +850,7 @@ export class CaseService {
       navigationTarget: { tab: 'documents', action: 'generate_cert' }
     });
 
-    // 8. Important Investigation Documents (Witness Statement, Seizure Memo, etc.)
+    // 8. Important Investigation Documents
     const hasWitnessStatement = documents.some(d => d.category === 'Witness Statement');
     const hasSeizureMemo = documents.some(d => d.category === 'Evidence Record' || d.title.toLowerCase().includes('panchnama'));
     const hasInvestigationDocs = hasWitnessStatement || hasSeizureMemo;
@@ -873,16 +866,20 @@ export class CaseService {
     });
 
     // 9. Document Integrity Verification
-    const versions = db.document_versions.filter(v => docIds.has(v.documentId));
-    const allVersionsHaveHashes = versions.length > 0 && versions.every(v => v.sha256Hash && v.sha256Hash.length === 64);
+    const allVersions: any[] = [];
+    for (const d of documents) {
+      const vers = await DocumentRepository.findVersionsByDocId(d.id);
+      allVersions.push(...vers);
+    }
+    const allVersionsHaveHashes = allVersions.length > 0 && allVersions.every(v => v.sha256Hash && v.sha256Hash.length === 64);
     checks.push({
       key: 'integrity_verification',
       label: 'Cryptographic SHA-256 Integrity Verification',
       category: 'Evidentiary Integrity',
-      status: versions.length === 0 ? 'WARNING' : allVersionsHaveHashes ? 'COMPLETE' : 'MISSING',
-      message: versions.length === 0
+      status: allVersions.length === 0 ? 'WARNING' : allVersionsHaveHashes ? 'COMPLETE' : 'MISSING',
+      message: allVersions.length === 0
         ? 'No document versions on file.'
-        : `${versions.length} document version(s) anchored with unbroken 256-bit SHA hashes.`,
+        : `${allVersions.length} document version(s) anchored with unbroken 256-bit SHA hashes.`,
       navigationTarget: { tab: 'documents' }
     });
 
@@ -926,26 +923,33 @@ export class CaseService {
 
   /**
    * FEATURE 8: Evidence Package Export
-   * Generates a self-contained, cryptographically verifiable ZIP package
+   * Generates a self-contained, cryptographically verifiable ZIP package from PostgreSQL
    */
   public static async generateEvidencePackage(
     caseId: string, 
     options: EvidencePackageOptions, 
     actor: { id: string; name: string; role: UserRole; ip: string }
   ): Promise<{ buffer: Buffer; fileName: string }> {
-    const caseItem = db.cases.find(c => c.id === caseId || c.caseNumber === caseId);
+    const caseItem = await CaseRepository.findById(caseId) || await CaseRepository.findByCaseNumber(caseId);
     if (!caseItem) throw new Error(`Case '${caseId}' not found.`);
 
-    const documents = db.documents.filter(d => d.caseId === caseItem.id && !d.isDeleted);
-    const docIds = new Set(documents.map(d => d.id));
-    const evidence = db.evidence_items.filter(e => e.caseId === caseItem.id);
-    const custodyEvents = db.custody_events.filter(ce => evidence.some(e => e.id === ce.evidenceId));
-    const signatures = db.digital_signatures.filter(s => docIds.has(s.documentId));
-    const auditLogs = db.audit_events.filter(l => 
-      l.resourceId === caseItem.id ||
-      docIds.has(l.resourceId) ||
-      (l.details && l.details.includes(caseItem.caseNumber))
-    );
+    const documents = await DocumentRepository.findByCaseId(caseItem.id, false);
+    const evidence = await EvidenceRepository.findByCaseId(caseItem.id);
+
+    const signatures: any[] = [];
+    for (const doc of documents) {
+      const sigs = await SignatureRepository.findByDocId(doc.id);
+      signatures.push(...sigs);
+    }
+
+    const custodyEvents: any[] = [];
+    for (const ev of evidence) {
+      const cust = await CustodyRepository.findByEvidenceId(ev.id);
+      custodyEvents.push(...cust);
+    }
+
+    const auditRes = await AuditRepository.queryLogs({ caseId: caseItem.id, limit: 100 });
+    const auditLogs = auditRes.logs;
 
     const zip = new ZipBuilder();
     const manifestLines: string[] = [];
@@ -1034,7 +1038,7 @@ CONTENTS INCLUDED IN THIS PACKAGE:
       const docManifest: any[] = [];
 
       for (const doc of documents) {
-        const versions = db.document_versions.filter(v => v.documentId === doc.id);
+        const versions = await DocumentRepository.findVersionsByDocId(doc.id);
         const curVer = versions.find(v => v.versionNumber === doc.currentVersionNumber) || versions[0];
         
         let fileData: Buffer;
@@ -1095,7 +1099,7 @@ CONTENTS INCLUDED IN THIS PACKAGE:
     const fileName = `EVIDENCE_PACKAGE_${caseItem.caseNumber.replace(/[^a-zA-Z0-9_-]/g, '_')}_${new Date().toISOString().split('T')[0]}.zip`;
 
     // Audit log
-    AuditService.log({
+    await AuditService.log({
       actorId: actor.id,
       actorName: actor.name,
       actorRole: actor.role,
@@ -1115,9 +1119,9 @@ CONTENTS INCLUDED IN THIS PACKAGE:
 
   /**
    * FEATURE 10: Investigation Summary
-   * Generates a 10-section case summary derived strictly from factual project records
+   * Generates a 10-section case summary derived strictly from factual project records in PostgreSQL
    */
-  public static generateInvestigationSummary(caseId: string): {
+  public static async generateInvestigationSummary(caseId: string): Promise<{
     caseOverview: any;
     keyPeople: any[];
     keyDocuments: any[];
@@ -1129,22 +1133,31 @@ CONTENTS INCLUDED IN THIS PACKAGE:
     legalReferences: any[];
     integrityStatus: any;
     generatedAt: string;
-  } {
-    const caseItem = db.cases.find(c => c.id === caseId || c.caseNumber === caseId);
+  }> {
+    const caseItem = await CaseRepository.findById(caseId) || await CaseRepository.findByCaseNumber(caseId);
     if (!caseItem) throw new Error(`Case '${caseId}' not found.`);
 
-    const documents = db.documents.filter(d => d.caseId === caseItem.id && !d.isDeleted);
-    const docIds = new Set(documents.map(d => d.id));
-    const evidence = db.evidence_items.filter(e => e.caseId === caseItem.id);
-    const custody = db.custody_events.filter(ce => evidence.some(e => e.id === ce.evidenceId));
-    const signatures = db.digital_signatures.filter(s => docIds.has(s.documentId));
-    const persons = db.persons.filter(p => p.linkedCases.some(lc => lc.caseId === caseItem.id));
-    const readiness = this.calculateCaseReadiness(caseItem.id);
-    const auditLogs = db.audit_events.filter(l => 
-      l.resourceId === caseItem.id ||
-      docIds.has(l.resourceId) ||
-      (l.details && l.details.includes(caseItem.caseNumber))
-    );
+    const documents = await DocumentRepository.findByCaseId(caseItem.id, false);
+    const evidence = await EvidenceRepository.findByCaseId(caseItem.id);
+
+    const signatures: any[] = [];
+    for (const doc of documents) {
+      const sigs = await SignatureRepository.findByDocId(doc.id);
+      signatures.push(...sigs);
+    }
+
+    const custody: any[] = [];
+    for (const ev of evidence) {
+      const cust = await CustodyRepository.findByEvidenceId(ev.id);
+      custody.push(...cust);
+    }
+
+    const allPersons = await PersonRepository.findMany();
+    const persons = allPersons.filter(p => p.linkedCases.some(lc => lc.caseId === caseItem.id));
+
+    const readiness = await this.calculateCaseReadiness(caseItem.id);
+    const auditRes = await AuditRepository.queryLogs({ caseId: caseItem.id, limit: 100 });
+    const auditLogs = auditRes.logs;
 
     // 1. Case Overview
     const caseOverview = {
@@ -1193,9 +1206,11 @@ CONTENTS INCLUDED IN THIS PACKAGE:
     }
 
     // 3. Key Documents
-    const keyDocuments = documents.map(d => {
-      const ver = db.document_versions.find(v => v.documentId === d.id && v.versionNumber === d.currentVersionNumber);
-      return {
+    const keyDocuments: any[] = [];
+    for (const d of documents) {
+      const vers = await DocumentRepository.findVersionsByDocId(d.id);
+      const ver = vers.find(v => v.versionNumber === d.currentVersionNumber);
+      keyDocuments.push({
         id: d.id,
         documentNumber: d.documentNumber,
         title: d.title,
@@ -1205,8 +1220,8 @@ CONTENTS INCLUDED IN THIS PACKAGE:
         sha256Hash: ver?.sha256Hash || 'N/A',
         isSigned: signatures.some(s => s.documentId === d.id),
         sourceCitation: `[Document ${d.documentNumber}, Version ${d.currentVersionNumber}]`
-      };
-    });
+      });
+    }
 
     // 4. Evidence Items
     const evidenceList = evidence.map(e => ({
@@ -1222,7 +1237,7 @@ CONTENTS INCLUDED IN THIS PACKAGE:
     }));
 
     // 5. Important Events
-    const rawTimeline = this.getComprehensiveTimeline(caseItem.id);
+    const rawTimeline = await this.getComprehensiveTimeline(caseItem.id);
     const importantEvents = rawTimeline.slice(0, 10).map(t => ({
       timestamp: t.timestamp,
       dateFormatted: t.dateFormatted,
@@ -1239,7 +1254,7 @@ CONTENTS INCLUDED IN THIS PACKAGE:
       summary: t.description.slice(0, 90) + (t.description.length > 90 ? '...' : '')
     }));
 
-    // 7. Potential Contradictions (from intelligence service or dynamic scan)
+    // 7. Potential Contradictions
     const potentialContradictions = [
       {
         title: 'Potential contradiction detected in witness descriptions',
@@ -1249,7 +1264,7 @@ CONTENTS INCLUDED IN THIS PACKAGE:
       }
     ];
 
-    // 8. Missing Information (from readiness checks)
+    // 8. Missing Information
     const missingInformation = readiness.checks
       .filter(c => c.status !== 'COMPLETE')
       .map(c => ({

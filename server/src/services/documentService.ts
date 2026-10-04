@@ -1,9 +1,18 @@
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/database.js';
 import { StorageService } from './storageService.js';
 import { LedgerService } from './ledgerService.js';
 import { AuditService } from './auditService.js';
 import { AIService } from './aiService.js';
+import { PostgresService } from '../db/postgres.js';
+import {
+  CaseRepository,
+  DocumentRepository,
+  SignatureRepository,
+  LedgerRepository,
+  AIAnalysisRepository,
+  EvidenceRepository,
+  CustodyRepository
+} from '../repositories/index.js';
 import {
   Document,
   DocumentVersion,
@@ -17,7 +26,6 @@ import {
   VersionTextDiffLine,
   IntegrityReportItem
 } from '../types/index.js';
-import { CryptoService } from './cryptoService.js';
 
 export interface CreateDocumentParams {
   caseId: string;
@@ -52,16 +60,17 @@ export interface UploadNewVersionParams {
 
 export class DocumentService {
   /**
-   * Creates a new document and initial Version 1
+   * Creates a new document and initial Version 1 in PostgreSQL
    */
   public static async createDocument(params: CreateDocumentParams): Promise<Document> {
-    const caseItem = db.cases.find(c => c.id === params.caseId);
+    const caseItem = await CaseRepository.findById(params.caseId);
     if (!caseItem) {
       throw new Error(`Associated case '${params.caseId}' not found.`);
     }
 
     const documentId = `DOC-${Date.now()}-${uuidv4().slice(0, 6)}`;
-    const documentNumber = `DOC-${new Date().getFullYear()}-${db.documents.length + 1001}`;
+    const currentCount = await DocumentRepository.count();
+    const documentNumber = `DOC-${new Date().getFullYear()}-${currentCount + 1001}`;
     const retentionYears = params.retentionYears || 10;
     const retentionUntil = new Date(Date.now() + retentionYears * 365 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -76,7 +85,7 @@ export class DocumentService {
     });
 
     // 2. Anchor to ledger
-    const ledgerBlock = LedgerService.createBlock({
+    const ledgerBlock = await LedgerService.createBlock({
       eventType: 'DOCUMENT_VERSION_CREATED',
       resourceType: 'DOCUMENT',
       resourceId: documentId,
@@ -95,7 +104,7 @@ export class DocumentService {
       }
     });
 
-    // 3. Create Version 1 record
+    // 3. Create Version 1 record in PostgreSQL
     const version1: DocumentVersion = {
       id: `VER-${Date.now()}-${uuidv4().slice(0, 6)}`,
       documentId,
@@ -116,9 +125,7 @@ export class DocumentService {
       ledgerBlockId: ledgerBlock.blockHash
     };
 
-    db.document_versions.push(version1);
-
-    // 4. Create Document Parent Record
+    // 4. Create Document Parent Record in PostgreSQL
     const newDoc: Document = {
       id: documentId,
       documentNumber,
@@ -141,15 +148,17 @@ export class DocumentService {
       updatedAt: new Date().toISOString()
     };
 
-    db.documents.unshift(newDoc);
-    db.save();
+    await DocumentRepository.create(newDoc);
+    await DocumentRepository.createVersion(version1);
 
     // 5. Trigger Privacy-Aware AI analysis in background / synchronous
     const textPreview = params.fileBuffer.toString('utf-8', 0, Math.min(params.fileBuffer.length, 5000));
-    AIService.analyzeDocument(documentId, textPreview, params.originalFileName);
+    AIService.analyzeDocument(documentId, textPreview, params.originalFileName).catch(err => {
+      console.warn(`[DocumentService] AI analysis note: ${err.message}`);
+    });
 
     // 6. Audit log
-    AuditService.log({
+    await AuditService.log({
       actorId: params.actorId,
       actorName: params.actorName,
       actorRole: params.actorRole,
@@ -171,8 +180,8 @@ export class DocumentService {
    * Uploads a new version of an existing document (v2, v3...)
    */
   public static async uploadNewVersion(params: UploadNewVersionParams): Promise<DocumentVersion> {
-    const doc = db.documents.find(d => d.id === params.documentId && !d.isDeleted);
-    if (!doc) {
+    const doc = await DocumentRepository.findById(params.documentId);
+    if (!doc || doc.isDeleted) {
       throw new Error(`Document '${params.documentId}' not found.`);
     }
 
@@ -189,7 +198,7 @@ export class DocumentService {
     });
 
     // 2. Anchor to ledger
-    const ledgerBlock = LedgerService.createBlock({
+    const ledgerBlock = await LedgerService.createBlock({
       eventType: 'DOCUMENT_VERSION_UPDATED',
       resourceType: 'DOCUMENT',
       resourceId: doc.id,
@@ -206,7 +215,7 @@ export class DocumentService {
       }
     });
 
-    // 3. Create Version Record
+    // 3. Create Version Record in PostgreSQL
     const newVersion: DocumentVersion = {
       id: `VER-${Date.now()}-${uuidv4().slice(0, 6)}`,
       documentId: doc.id,
@@ -227,20 +236,23 @@ export class DocumentService {
       ledgerBlockId: ledgerBlock.blockHash
     };
 
-    db.document_versions.push(newVersion);
+    await DocumentRepository.createVersion(newVersion);
 
-    // 4. Update Document parent
-    doc.currentVersionNumber = nextVersionNumber;
-    doc.reviewStatus = 'Submitted for Review';
-    doc.updatedAt = new Date().toISOString();
-    db.save();
+    // 4. Update Document parent in PostgreSQL
+    await DocumentRepository.update(doc.id, {
+      currentVersionNumber: nextVersionNumber,
+      reviewStatus: 'Submitted for Review',
+      updatedAt: new Date().toISOString()
+    });
 
     // 5. Re-run AI analysis
     const textPreview = params.fileBuffer.toString('utf-8', 0, Math.min(params.fileBuffer.length, 5000));
-    AIService.analyzeDocument(doc.id, textPreview, params.originalFileName);
+    AIService.analyzeDocument(doc.id, textPreview, params.originalFileName).catch(err => {
+      console.warn(`[DocumentService] AI analysis note: ${err.message}`);
+    });
 
     // 6. Audit log
-    AuditService.log({
+    await AuditService.log({
       actorId: params.actorId,
       actorName: params.actorName,
       actorRole: params.actorRole,
@@ -259,34 +271,33 @@ export class DocumentService {
   }
 
   /**
-   * Retrieves document with versions, signatures, and AI analysis
+   * Retrieves document with versions, signatures, and AI analysis from PostgreSQL
    */
-  public static getDocumentDetail(documentId: string): {
+  public static async getDocumentDetail(documentId: string): Promise<{
     document: Document;
     versions: DocumentVersion[];
     signatures: any[];
     aiAnalysis?: any;
-  } | null {
-    const doc = db.documents.find(d => (d.id === documentId || d.documentNumber === documentId) && !d.isDeleted);
-    if (!doc) return null;
+  } | null> {
+    const doc = await DocumentRepository.findByIdOrNumber(documentId);
+    if (!doc || doc.isDeleted) return null;
 
-    const versions = db.document_versions
-      .filter(v => v.documentId === doc.id)
-      .sort((a, b) => b.versionNumber - a.versionNumber);
+    const versions = await DocumentRepository.findVersionsByDocId(doc.id);
+    versions.sort((a, b) => b.versionNumber - a.versionNumber);
 
-    const signatures = db.digital_signatures.filter(s => s.documentId === doc.id);
-    const aiAnalysis = db.ai_analyses.find(a => a.documentId === doc.id);
+    const signatures = await SignatureRepository.findByDocId(doc.id);
+    const aiAnalysis = await AIAnalysisRepository.findByDocumentId(doc.id);
 
     return {
       document: doc,
       versions,
       signatures,
-      aiAnalysis
+      aiAnalysis: aiAnalysis || undefined
     };
   }
 
   /**
-   * Verifies live cryptographic integrity of a document version
+   * Verifies live cryptographic integrity of a document version against storage and PostgreSQL ledger
    */
   public static async verifyDocumentIntegrity(documentId: string, versionNumber?: number): Promise<{
     matches: boolean;
@@ -297,20 +308,22 @@ export class DocumentService {
     ledgerAnchorBlock?: any;
     verifiedAt: string;
   }> {
-    const doc = db.documents.find(d => d.id === documentId);
+    const doc = await DocumentRepository.findById(documentId);
     if (!doc) throw new Error('Document not found');
 
     const targetVersionNumber = versionNumber || doc.currentVersionNumber;
-    const version = db.document_versions.find(v => v.documentId === doc.id && v.versionNumber === targetVersionNumber);
+    const versions = await DocumentRepository.findVersionsByDocId(doc.id);
+    const version = versions.find(v => v.versionNumber === targetVersionNumber);
     if (!version) throw new Error(`Version v${targetVersionNumber} not found.`);
 
     const check = await StorageService.verifyFileIntegrity(version.storedFileName, version.isEncrypted, version.sha256Hash);
 
-    // Locate matching ledger block
-    const ledgerBlock = db.ledger_blocks.find(b => 
-      b.resourceId === doc.id && 
-      (b.resourceHash === version.sha256Hash || b.payload?.versionNumber === targetVersionNumber)
+    // Locate matching ledger block in PostgreSQL
+    const blockRes = await PostgresService.query(
+      `SELECT * FROM ledger_blocks WHERE resource_id = $1 AND (resource_hash = $2 OR ((payload::jsonb)->>'versionNumber')::int = $3) ORDER BY block_index DESC LIMIT 1`,
+      [doc.id, version.sha256Hash, targetVersionNumber]
     );
+    const ledgerBlock = blockRes.rows.length > 0 ? LedgerRepository.mapRowToBlock(blockRes.rows[0]) : undefined;
 
     return {
       matches: check.matches,
@@ -324,9 +337,9 @@ export class DocumentService {
   }
 
   /**
-   * Queries documents with multi-field search and filters
+   * Queries documents with multi-field search and filters directly in PostgreSQL
    */
-  public static searchDocuments(user: { id: string; role: UserRole; department: string }, filters: {
+  public static async searchDocuments(user: { id: string; role: UserRole; department: string }, filters: {
     caseId?: string;
     category?: string;
     confidentiality?: string;
@@ -334,74 +347,93 @@ export class DocumentService {
     search?: string;
     limit?: number;
     offset?: number;
-  }): { total: number; documents: Document[] } {
-    let list = db.documents.filter(d => !d.isDeleted);
+  }): Promise<{ total: number; documents: Document[] }> {
+    let sql = 'SELECT * FROM documents WHERE is_deleted = false';
+    const params: any[] = [];
 
     // Role-based access constraints
     if (user.role === 'investigating_officer') {
-      const allowedCaseIds = new Set(
-        db.cases
-          .filter(c => 
-            c.investigatingOfficerId === user.id || 
-            (c.assignedTeam && c.assignedTeam.includes(user.id)) || 
-            c.department === user.department ||
-            user.department.toLowerCase().includes(c.department.toLowerCase()) ||
-            c.department.toLowerCase().includes(user.department.toLowerCase().split(' ')[0]) ||
-            c.jurisdiction.toLowerCase().includes('delhi')
-          )
-          .map(c => c.id)
-      );
-      list = list.filter(d => allowedCaseIds.has(d.caseId) || d.authorId === user.id);
+      params.push(user.id);
+      const uidParam = params.length;
+      params.push(user.department);
+      const udeptParam = params.length;
+      params.push(`%${user.department.split(' ')[0]}%`);
+      const udeptPartParam = params.length;
+
+      sql += ` AND (
+        author_id = $${uidParam} OR
+        case_id IN (
+          SELECT id FROM cases WHERE
+            investigating_officer_id = $${uidParam} OR
+            assigned_team ? $${uidParam} OR
+            department = $${udeptParam} OR
+            department ILIKE $${udeptPartParam} OR
+            jurisdiction ILIKE '%delhi%'
+        )
+      )`;
     }
 
     if (filters.caseId) {
-      list = list.filter(d => d.caseId === filters.caseId || d.caseNumber === filters.caseId);
+      params.push(filters.caseId);
+      sql += ` AND (case_id = $${params.length} OR LOWER(case_number) = LOWER($${params.length}))`;
     }
     if (filters.category) {
-      list = list.filter(d => d.category === filters.category);
+      params.push(filters.category);
+      sql += ` AND category = $${params.length}`;
     }
     if (filters.confidentiality) {
-      list = list.filter(d => d.confidentiality === filters.confidentiality);
+      params.push(filters.confidentiality);
+      sql += ` AND confidentiality = $${params.length}`;
     }
     if (filters.reviewStatus) {
-      list = list.filter(d => d.reviewStatus === filters.reviewStatus);
+      params.push(filters.reviewStatus);
+      sql += ` AND review_status = $${params.length}`;
     }
     if (filters.search) {
-      const q = filters.search.toLowerCase();
-      list = list.filter(d =>
-        d.title.toLowerCase().includes(q) ||
-        d.documentNumber.toLowerCase().includes(q) ||
-        d.caseNumber.toLowerCase().includes(q) ||
-        d.authorName.toLowerCase().includes(q) ||
-        d.description.toLowerCase().includes(q)
-      );
+      params.push(`%${filters.search.toLowerCase()}%`);
+      sql += ` AND (
+        LOWER(title) LIKE $${params.length} OR
+        LOWER(document_number) LIKE $${params.length} OR
+        LOWER(case_number) LIKE $${params.length} OR
+        LOWER(author_name) LIKE $${params.length} OR
+        LOWER(description) LIKE $${params.length}
+      )`;
     }
 
-    const total = list.length;
-    const offset = filters.offset || 0;
-    const limit = filters.limit || 50;
+    // Count query
+    const countSql = `SELECT COUNT(*) AS total FROM (${sql}) AS subquery`;
+    const countRes = await PostgresService.query(countSql, params);
+    const total = parseInt(countRes.rows[0].total, 10);
 
-    return { total, documents: list.slice(offset, offset + limit) };
+    // Pagination
+    sql += ' ORDER BY created_at DESC';
+    const limit = filters.limit || 50;
+    const offset = filters.offset || 0;
+    params.push(limit);
+    sql += ` LIMIT $${params.length}`;
+    params.push(offset);
+    sql += ` OFFSET $${params.length}`;
+
+    const res = await PostgresService.query(sql, params);
+    const documents = res.rows.map(r => DocumentRepository.mapRowToDocument(r));
+
+    return { total, documents };
   }
 
   /**
-   * Soft delete a document (enforces Legal Hold check)
+   * Soft delete a document in PostgreSQL (enforces Legal Hold check)
    */
-  public static softDeleteDocument(documentId: string, actor: { id: string; name: string; role: UserRole; ip: string }): boolean {
-    const doc = db.documents.find(d => d.id === documentId && !d.isDeleted);
-    if (!doc) throw new Error('Document not found or already deleted.');
+  public static async softDeleteDocument(documentId: string, actor: { id: string; name: string; role: UserRole; ip: string }): Promise<boolean> {
+    const doc = await DocumentRepository.findById(documentId);
+    if (!doc || doc.isDeleted) throw new Error('Document not found or already deleted.');
 
     if (doc.isLegalHold) {
       throw new Error(`Action Blocked: Document ${doc.documentNumber} is under active LEGAL HOLD and cannot be deleted or archived.`);
     }
 
-    doc.isDeleted = true;
-    doc.deletedAt = new Date().toISOString();
-    doc.deletedBy = actor.id;
-    doc.updatedAt = new Date().toISOString();
-    db.save();
+    await DocumentRepository.softDelete(doc.id, actor.id);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: actor.id,
       actorName: actor.name,
       actorRole: actor.role,
@@ -424,12 +456,11 @@ export class DocumentService {
    * Compares Version A vs Version B with visual diffs and metadata changes
    */
   public static async compareVersions(documentId: string, v1Num?: number, v2Num?: number): Promise<VersionDiffResult> {
-    const doc = db.documents.find(d => d.id === documentId || d.documentNumber === documentId);
+    const doc = await DocumentRepository.findByIdOrNumber(documentId);
     if (!doc) throw new Error('Document not found');
 
-    const versions = db.document_versions
-      .filter(v => v.documentId === doc.id)
-      .sort((a, b) => a.versionNumber - b.versionNumber);
+    const versions = await DocumentRepository.findVersionsByDocId(doc.id);
+    versions.sort((a, b) => a.versionNumber - b.versionNumber);
 
     if (versions.length === 0) throw new Error('No versions available for comparison.');
 
@@ -453,12 +484,11 @@ export class DocumentService {
       } catch {}
 
       // Fallback to AI analysis text or official mock transcription
-      const ai = db.ai_analyses.find(a => a.documentId === doc.id);
+      const ai = await AIAnalysisRepository.findByDocumentId(doc.id);
       if (ai && ai.extractedText) {
         if (ver.versionNumber === 1) {
           return ai.extractedText;
         } else {
-          // Provide realistic revised version with modified date/witness
           return ai.extractedText
             .replace(/12\s+Aug(?:ust)?\s+2026/gi, '14 Aug 2026')
             .replace(/Ramesh\s+Kumar/gi, 'Ramesh K. (Security Supervisor)')
@@ -518,7 +548,6 @@ export class DocumentService {
       summaryOfChanges.push(`Author change declaration: "${v2.changeSummary}"`);
     }
 
-    // Scan text diffs for specific value changes
     textDiffs.filter(d => d.type === 'REMOVED').forEach(rem => {
       const addedMatch = textDiffs.find(d => d.type === 'ADDED' && Math.abs((d.lineB || 0) - (rem.lineA || 0)) <= 2);
       if (addedMatch && rem.content.trim() !== addedMatch.content.trim()) {
@@ -556,10 +585,10 @@ export class DocumentService {
    * FEATURE 6: Detect PII (Personally Identifiable Information)
    */
   public static async detectPII(documentId: string, versionNumber?: number): Promise<RedactedItem[]> {
-    const doc = db.documents.find(d => d.id === documentId || d.documentNumber === documentId);
+    const doc = await DocumentRepository.findByIdOrNumber(documentId);
     if (!doc) throw new Error('Document not found');
 
-    const versions = db.document_versions.filter(v => v.documentId === doc.id);
+    const versions = await DocumentRepository.findVersionsByDocId(doc.id);
     const targetVer = versions.find(v => v.versionNumber === (versionNumber || doc.currentVersionNumber)) || versions[0];
 
     let textContent = '';
@@ -571,7 +600,7 @@ export class DocumentService {
     } catch {}
 
     if (!textContent || textContent.length < 50) {
-      const ai = db.ai_analyses.find(a => a.documentId === doc.id);
+      const ai = await AIAnalysisRepository.findByDocumentId(doc.id);
       textContent = ai?.extractedText || `Complainant: Rajesh Kumar, Phone: +91 98110 44219, Email: rajesh.k@nic.in, Aadhaar: 5491 8821 0042, PAN: ABCDE1234F, Address: House 42, Sector 15, Rohini, New Delhi 110085. Deposed regarding robbery of vehicle DL-03-XX.`;
     }
 
@@ -631,7 +660,7 @@ export class DocumentService {
       });
     }
 
-    // 4. PAN Numbers (Permanent Account Number)
+    // 4. PAN Numbers
     const panRegex = /\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/g;
     while ((match = panRegex.exec(textContent)) !== null) {
       const raw = match[0];
@@ -669,8 +698,7 @@ export class DocumentService {
   }
 
   /**
-   * FEATURE 6: Create Redacted Derivative
-   * Generates a separate cryptographic copy without modifying the original document
+   * FEATURE 6: Create Redacted Derivative in PostgreSQL
    */
   public static async createRedactedDerivative(params: {
     documentId: string;
@@ -680,10 +708,10 @@ export class DocumentService {
     exportPurpose?: string;
     actor: { id: string; name: string; role: UserRole; ip: string };
   }): Promise<RedactedDocument> {
-    const doc = db.documents.find(d => d.id === params.documentId || d.documentNumber === params.documentId);
+    const doc = await DocumentRepository.findByIdOrNumber(params.documentId);
     if (!doc) throw new Error('Document not found');
 
-    const versions = db.document_versions.filter(v => v.documentId === doc.id);
+    const versions = await DocumentRepository.findVersionsByDocId(doc.id);
     const sourceVer = versions.find(v => v.versionNumber === params.versionNumber) || versions[0];
     if (!sourceVer) throw new Error(`Version v${params.versionNumber} not found.`);
 
@@ -697,7 +725,7 @@ export class DocumentService {
     } catch {}
 
     if (!content || content.length < 50) {
-      const ai = db.ai_analyses.find(a => a.documentId === doc.id);
+      const ai = await AIAnalysisRepository.findByDocumentId(doc.id);
       content = ai?.extractedText || `[OFFICIAL LEGAL DOCKET]\nDocument Number: ${doc.documentNumber}\nTitle: ${doc.title}\nComplainant: Rajesh Kumar, Phone: +91 98110 44219, Email: rajesh.k@nic.in, Aadhaar: 5491 8821 0042\nCase: ${doc.caseNumber}\n`;
     }
 
@@ -710,7 +738,6 @@ export class DocumentService {
       }
     });
 
-    // Apply any custom terms to mask
     if (params.customTerms && params.customTerms.length > 0) {
       params.customTerms.forEach(term => {
         if (term.trim()) {
@@ -750,7 +777,7 @@ in the secure sovereign repository. This file is an authorized redacted derivati
     });
 
     // Anchor redacted derivative to ledger
-    const ledgerBlock = LedgerService.createBlock({
+    const ledgerBlock = await LedgerService.createBlock({
       eventType: 'DOCUMENT_REDACTED_DERIVATIVE_CREATED',
       resourceType: 'DOCUMENT',
       resourceId: redactedId,
@@ -787,11 +814,9 @@ in the secure sovereign repository. This file is an authorized redacted derivati
       ledgerBlockId: ledgerBlock.blockHash
     };
 
-    db.redacted_documents.unshift(redactedRecord);
-    db.save();
+    await DocumentRepository.createRedacted(redactedRecord);
 
-    // Log audit event
-    AuditService.log({
+    await AuditService.log({
       actorId: params.actor.id,
       actorName: params.actor.name,
       actorRole: params.actor.role,
@@ -810,35 +835,40 @@ in the secure sovereign repository. This file is an authorized redacted derivati
   }
 
   /**
-   * FEATURE 6: Get Redacted Copies for a document
+   * FEATURE 6: Get Redacted Copies for a document from PostgreSQL
    */
-  public static getRedactedCopies(documentId: string): RedactedDocument[] {
-    const doc = db.documents.find(d => d.id === documentId || d.documentNumber === documentId);
+  public static async getRedactedCopies(documentId: string): Promise<RedactedDocument[]> {
+    const doc = await DocumentRepository.findByIdOrNumber(documentId);
     if (!doc) return [];
-    return db.redacted_documents.filter(r => r.originalDocumentId === doc.id);
+    return await DocumentRepository.findRedactedByDocId(doc.id);
   }
 
   /**
    * FEATURE 7: Evidence Integrity Center
-   * Performs live real-time verification of all documents and evidence against on-disk binaries and Merkle blocks
+   * Performs live real-time verification of all documents and evidence against on-disk binaries and PostgreSQL Merkle blocks
    */
   public static async getIntegrityCenterReport(caseId?: string): Promise<IntegrityReportItem[]> {
     const report: IntegrityReportItem[] = [];
 
     const targetDocs = caseId 
-      ? db.documents.filter(d => (d.caseId === caseId || d.caseNumber === caseId) && !d.isDeleted)
-      : db.documents.filter(d => !d.isDeleted).slice(0, 30);
+      ? await DocumentRepository.findMany({ caseId })
+      : await DocumentRepository.findMany({ limit: 30 });
 
     const targetEvidence = caseId
-      ? db.evidence_items.filter(e => e.caseId === caseId || e.caseNumber === caseId)
-      : db.evidence_items.slice(0, 30);
+      ? await EvidenceRepository.findAll({ caseId })
+      : await EvidenceRepository.findAll({ limit: 30 });
 
     // 1. Verify Documents
     for (const doc of targetDocs) {
-      const versions = db.document_versions.filter(v => v.documentId === doc.id);
+      const versions = await DocumentRepository.findVersionsByDocId(doc.id);
       const currentVer = versions.find(v => v.versionNumber === doc.currentVersionNumber) || versions[0];
-      const signatures = db.digital_signatures.filter(s => s.documentId === doc.id);
-      const ledgerBlock = db.ledger_blocks.find(b => b.resourceId === doc.id);
+      const signatures = await SignatureRepository.findByDocId(doc.id);
+
+      const blockRes = await PostgresService.query(
+        'SELECT * FROM ledger_blocks WHERE resource_id = $1 ORDER BY block_index DESC LIMIT 1',
+        [doc.id]
+      );
+      const ledgerBlock = blockRes.rows.length > 0 ? LedgerRepository.mapRowToBlock(blockRes.rows[0]) : undefined;
 
       if (currentVer) {
         let isMatching = true;
@@ -851,7 +881,6 @@ in the secure sovereign repository. This file is an authorized redacted derivati
             computedHash = check.computedHash;
           }
         } catch {
-          // If storage check threw, mark as failure or unverified
           isMatching = false;
         }
 
@@ -886,8 +915,12 @@ in the secure sovereign repository. This file is an authorized redacted derivati
 
     // 2. Verify Evidence Items
     for (const ev of targetEvidence) {
-      const custody = db.custody_events.filter(c => c.evidenceId === ev.id);
-      const ledgerBlock = db.ledger_blocks.find(b => b.resourceId === ev.id);
+      const custody = await CustodyRepository.findByEvidenceId(ev.id);
+      const blockRes = await PostgresService.query(
+        'SELECT * FROM ledger_blocks WHERE resource_id = $1 ORDER BY block_index DESC LIMIT 1',
+        [ev.id]
+      );
+      const ledgerBlock = blockRes.rows.length > 0 ? LedgerRepository.mapRowToBlock(blockRes.rows[0]) : undefined;
 
       report.push({
         id: `int-ev-${ev.id}`,

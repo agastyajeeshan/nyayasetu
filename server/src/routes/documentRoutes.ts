@@ -2,7 +2,7 @@ import { Router, Response } from 'express';
 import multer from 'multer';
 import { DocumentService } from '../services/documentService.js';
 import { StorageService } from '../services/storageService.js';
-import { db } from '../db/database.js';
+import { DocumentRepository } from '../repositories/documentRepository.js';
 import { authenticateJWT, requireRoles, AuthenticatedRequest } from '../middleware/auth.js';
 import { AuditService } from '../services/auditService.js';
 import { DocumentCategory, ConfidentialityLevel } from '../types/index.js';
@@ -15,21 +15,25 @@ const upload = multer({
 const router = Router();
 
 // Search & list documents
-router.get('/', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  const { caseId, category, confidentiality, reviewStatus, search, limit, offset } = req.query as Record<string, string>;
-  const result = DocumentService.searchDocuments(
-    { id: req.user!.id, role: req.user!.role, department: req.user!.department },
-    {
-      caseId,
-      category,
-      confidentiality,
-      reviewStatus,
-      search,
-      limit: limit ? parseInt(limit, 10) : undefined,
-      offset: offset ? parseInt(offset, 10) : undefined
-    }
-  );
-  res.json(result);
+router.get('/', authenticateJWT, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { caseId, category, confidentiality, reviewStatus, search, limit, offset } = req.query as Record<string, string>;
+    const result = await DocumentService.searchDocuments(
+      { id: req.user!.id, role: req.user!.role, department: req.user!.department },
+      {
+        caseId,
+        category,
+        confidentiality,
+        reviewStatus,
+        search,
+        limit: limit ? parseInt(limit, 10) : undefined,
+        offset: offset ? parseInt(offset, 10) : undefined
+      }
+    );
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Upload new document (v1)
@@ -49,10 +53,13 @@ router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervi
       return;
     }
 
-    const validation = StorageService.validateFile(file.originalname, file.mimetype, file.size);
-    if (!validation.valid) {
-      res.status(400).json({ error: validation.error });
-      return;
+    let parsedTags: string[] = [];
+    if (tags) {
+      try {
+        parsedTags = typeof tags === 'string' ? JSON.parse(tags) : tags;
+      } catch {
+        parsedTags = String(tags).split(',').map(t => t.trim());
+      }
     }
 
     const newDoc = await DocumentService.createDocument({
@@ -62,7 +69,7 @@ router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervi
       description: description || '',
       confidentiality: (confidentiality as ConfidentialityLevel) || 'Confidential',
       retentionYears: retentionYears ? parseInt(retentionYears, 10) : 10,
-      tags: tags ? (Array.isArray(tags) ? tags : tags.split(',').map((t: string) => t.trim())) : [],
+      tags: parsedTags,
       fileBuffer: file.buffer,
       originalFileName: file.originalname,
       mimeType: file.mimetype,
@@ -75,16 +82,16 @@ router.post('/', authenticateJWT, requireRoles('investigating_officer', 'supervi
 
     res.status(201).json(newDoc);
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to upload document' });
+    res.status(500).json({ error: err.message });
   }
 });
 
 // Upload new version (v2, v3...)
-router.post('/:id/version', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'forensic_officer', 'prosecutor', 'admin'), upload.single('file'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+router.post('/:id/versions', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'forensic_officer', 'prosecutor', 'admin'), upload.single('file'), async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const file = req.file;
     if (!file) {
-      res.status(400).json({ error: 'File binary is required for new version.' });
+      res.status(400).json({ error: 'File binary is required for uploading a new version.' });
       return;
     }
 
@@ -92,13 +99,7 @@ router.post('/:id/version', authenticateJWT, requireRoles('investigating_officer
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
 
     if (!changeSummary) {
-      res.status(400).json({ error: 'Change summary is required when uploading a new version.' });
-      return;
-    }
-
-    const validation = StorageService.validateFile(file.originalname, file.mimetype, file.size);
-    if (!validation.valid) {
-      res.status(400).json({ error: validation.error });
+      res.status(400).json({ error: 'Mandatory change summary must be provided for version audit.' });
       return;
     }
 
@@ -117,13 +118,13 @@ router.post('/:id/version', authenticateJWT, requireRoles('investigating_officer
 
     res.status(201).json(newVersion);
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to upload version' });
+    res.status(500).json({ error: err.message });
   }
 });
 
 // Get document detail
-router.get('/:id', authenticateJWT, (req: AuthenticatedRequest, res: Response) => {
-  const detail = DocumentService.getDocumentDetail(req.params.id as string);
+router.get('/:id', authenticateJWT, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+  const detail = await DocumentService.getDocumentDetail(req.params.id as string);
   if (!detail) {
     res.status(404).json({ error: 'Document not found.' });
     return;
@@ -135,14 +136,15 @@ router.get('/:id', authenticateJWT, (req: AuthenticatedRequest, res: Response) =
 router.get('/:id/preview/:versionNumber?', authenticateJWT, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const docId = req.params.id as string;
-    const doc = db.documents.find(d => d.id === docId && !d.isDeleted);
-    if (!doc) {
+    const doc = await DocumentRepository.findById(docId);
+    if (!doc || doc.isDeleted) {
       res.status(404).json({ error: 'Document not found.' });
       return;
     }
 
     const versionNum = req.params.versionNumber ? parseInt(req.params.versionNumber as string, 10) : doc.currentVersionNumber;
-    const version = db.document_versions.find(v => v.documentId === doc.id && v.versionNumber === versionNum);
+    const versions = await DocumentRepository.findVersionsByDocId(doc.id);
+    const version = versions.find(v => v.versionNumber === versionNum);
     if (!version) {
       res.status(404).json({ error: `Version v${versionNum} not found.` });
       return;
@@ -150,7 +152,7 @@ router.get('/:id/preview/:versionNumber?', authenticateJWT, async (req: Authenti
 
     const buffer = await StorageService.readFile(version.storedFileName, version.isEncrypted);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: req.user!.id,
       actorName: req.user!.name,
       actorRole: req.user!.role,
@@ -178,8 +180,8 @@ router.get('/:id/preview/:versionNumber?', authenticateJWT, async (req: Authenti
 router.get('/:id/download/:versionNumber?', authenticateJWT, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const docId = req.params.id as string;
-    const doc = db.documents.find(d => d.id === docId && !d.isDeleted);
-    if (!doc) {
+    const doc = await DocumentRepository.findById(docId);
+    if (!doc || doc.isDeleted) {
       res.status(404).json({ error: 'Document not found.' });
       return;
     }
@@ -191,7 +193,8 @@ router.get('/:id/download/:versionNumber?', authenticateJWT, async (req: Authent
     }
 
     const versionNum = req.params.versionNumber ? parseInt(req.params.versionNumber as string, 10) : doc.currentVersionNumber;
-    const version = db.document_versions.find(v => v.documentId === doc.id && v.versionNumber === versionNum);
+    const versions = await DocumentRepository.findVersionsByDocId(doc.id);
+    const version = versions.find(v => v.versionNumber === versionNum);
     if (!version) {
       res.status(404).json({ error: `Version v${versionNum} not found.` });
       return;
@@ -199,7 +202,7 @@ router.get('/:id/download/:versionNumber?', authenticateJWT, async (req: Authent
 
     const buffer = await StorageService.readFile(version.storedFileName, version.isEncrypted);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: req.user!.id,
       actorName: req.user!.name,
       actorRole: req.user!.role,
@@ -229,7 +232,7 @@ router.post('/:id/verify-integrity', authenticateJWT, async (req: AuthenticatedR
     const { versionNumber } = req.body;
     const result = await DocumentService.verifyDocumentIntegrity(docId, versionNumber ? parseInt(versionNumber, 10) : undefined);
 
-    AuditService.log({
+    await AuditService.log({
       actorId: req.user!.id,
       actorName: req.user!.name,
       actorRole: req.user!.role,
@@ -253,13 +256,14 @@ router.post('/:id/verify-integrity', authenticateJWT, async (req: AuthenticatedR
 router.post('/:id/simulate-tamper', authenticateJWT, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
     const docId = req.params.id as string;
-    const doc = db.documents.find(d => d.id === docId);
+    const doc = await DocumentRepository.findById(docId);
     if (!doc) {
       res.status(404).json({ error: 'Document not found.' });
       return;
     }
 
-    const version = db.document_versions.find(v => v.documentId === doc.id && v.versionNumber === doc.currentVersionNumber);
+    const versions = await DocumentRepository.findVersionsByDocId(doc.id);
+    const version = versions.find(v => v.versionNumber === doc.currentVersionNumber);
     if (!version) {
       res.status(404).json({ error: 'Version not found.' });
       return;
@@ -276,10 +280,10 @@ router.post('/:id/simulate-tamper', authenticateJWT, async (req: AuthenticatedRe
 });
 
 // Soft delete document
-router.delete('/:id', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'admin'), (req: AuthenticatedRequest, res: Response) => {
+router.delete('/:id', authenticateJWT, requireRoles('investigating_officer', 'supervisor', 'admin'), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const ip = req.ip || req.socket.remoteAddress || '127.0.0.1';
-    DocumentService.softDeleteDocument(req.params.id as string, {
+    await DocumentService.softDeleteDocument(req.params.id as string, {
       id: req.user!.id,
       name: req.user!.name,
       role: req.user!.role,
@@ -344,9 +348,9 @@ router.post('/:id/create-redacted', authenticateJWT, async (req: AuthenticatedRe
 });
 
 // FEATURE 6: Get Redacted Copies for Document
-router.get('/:id/redacted-copies', authenticateJWT, (req: AuthenticatedRequest, res: Response): void => {
+router.get('/:id/redacted-copies', authenticateJWT, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const list = DocumentService.getRedactedCopies(req.params.id as string);
+    const list = await DocumentService.getRedactedCopies(req.params.id as string);
     res.json(list);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -356,7 +360,7 @@ router.get('/:id/redacted-copies', authenticateJWT, (req: AuthenticatedRequest, 
 // FEATURE 6: Download Redacted Copy File
 router.get('/redacted/:redactedId/download', authenticateJWT, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
   try {
-    const record = db.redacted_documents.find(r => r.id === req.params.redactedId);
+    const record = await DocumentRepository.findRedactedById(req.params.redactedId as string);
     if (!record) {
       res.status(404).json({ error: 'Redacted file record not found.' });
       return;

@@ -599,7 +599,7 @@ The complainant reported unauthorized diversion of ₹4.2 Crore from company esc
     encryptAtRest: true
   });
 
-  const block1 = LedgerService.createBlock({
+  const block1 = await LedgerService.createBlock({
     eventType: 'DOCUMENT_VERSION_CREATED',
     resourceType: 'DOCUMENT',
     resourceId: 'DOC-2026-001',
@@ -689,7 +689,7 @@ Positive ballistic match established under Arms Act Section 25 & 27 / IPC 307.`,
     encryptAtRest: true
   });
 
-  const block2 = LedgerService.createBlock({
+  const block2 = await LedgerService.createBlock({
     eventType: 'DOCUMENT_VERSION_CREATED',
     resourceType: 'DOCUMENT',
     resourceId: 'DOC-2026-002',
@@ -753,7 +753,7 @@ Positive ballistic match established under Arms Act Section 25 & 27 / IPC 307.`,
   const sigDigest = `${doc2Save.sha256Hash}:USR-FOR-01:CFSL-EXP-82:1:2026-08-19T10:00:00Z`;
   const signatureVal = CryptoService.signData(sigDigest, db.user_private_keys['USR-FOR-01']);
 
-  const sigBlock = LedgerService.createBlock({
+  const sigBlock = await LedgerService.createBlock({
     eventType: 'DOCUMENT_DIGITALLY_SIGNED',
     resourceType: 'DOCUMENT',
     resourceId: 'DOC-2026-002',
@@ -820,7 +820,7 @@ Positive ballistic match established under Arms Act Section 25 & 27 / IPC 307.`,
       encryptAtRest: true
     });
 
-    const block = LedgerService.createBlock({
+    const block = await LedgerService.createBlock({
       eventType: 'DOCUMENT_VERSION_CREATED',
       resourceType: 'DOCUMENT',
       resourceId: params.id,
@@ -885,7 +885,7 @@ Positive ballistic match established under Arms Act Section 25 & 27 / IPC 307.`,
       const sigDigest = `${saveResult.sha256Hash}:${params.signedBy.userId}:${params.signedBy.signerAgencyId}:1:${params.createdAt}`;
       const signatureVal = CryptoService.signData(sigDigest, db.user_private_keys[params.signedBy.userId]);
 
-      const sigBlock = LedgerService.createBlock({
+      const sigBlock = await LedgerService.createBlock({
         eventType: 'DOCUMENT_DIGITALLY_SIGNED',
         resourceType: 'DOCUMENT',
         resourceId: params.id,

@@ -1,4 +1,4 @@
-import { db } from '../db/database.js';
+import { LedgerRepository } from '../repositories/ledgerRepository.js';
 import { CryptoService } from './cryptoService.js';
 import { LedgerBlock } from '../types/index.js';
 
@@ -27,9 +27,10 @@ export class LedgerService {
   /**
    * Initializes Genesis Block if ledger is empty
    */
-  public static ensureGenesisBlock(): LedgerBlock {
-    if (db.ledger_blocks.length === 0) {
-      const genesisBlock = this.createBlock({
+  public static async ensureGenesisBlock(): Promise<LedgerBlock> {
+    const total = await LedgerRepository.count();
+    if (total === 0) {
+      const genesisBlock = await this.createBlock({
         eventType: 'GENESIS_BLOCK',
         resourceType: 'SYSTEM',
         resourceId: 'NYAYASETU-GENESIS-2026',
@@ -45,13 +46,14 @@ export class LedgerService {
       });
       return genesisBlock;
     }
-    return db.ledger_blocks[0];
+    const block0 = await LedgerRepository.getBlockByIndex(0);
+    return block0!;
   }
 
   /**
    * Appends an immutable block to the cryptographic ledger
    */
-  public static createBlock(params: {
+  public static async createBlock(params: {
     eventType: string;
     resourceType: string;
     resourceId: string;
@@ -59,12 +61,10 @@ export class LedgerService {
     actorId: string;
     actorName: string;
     payload: Record<string, any>;
-  }): LedgerBlock {
-    const blocks = db.ledger_blocks;
-    const blockIndex = blocks.length;
-    const previousHash = blockIndex === 0 
-      ? this.GENESIS_PREV_HASH 
-      : blocks[blockIndex - 1].blockHash;
+  }): Promise<LedgerBlock> {
+    const latest = await LedgerRepository.getLatestBlock();
+    const blockIndex = latest ? latest.blockIndex + 1 : 0;
+    const previousHash = latest ? latest.blockHash : this.GENESIS_PREV_HASH;
 
     const timestamp = new Date().toISOString();
 
@@ -95,8 +95,7 @@ export class LedgerService {
       blockHash
     };
 
-    blocks.push(newBlock);
-    db.save();
+    await LedgerRepository.createBlock(newBlock);
     return newBlock;
   }
 
@@ -118,8 +117,8 @@ export class LedgerService {
   /**
    * Audits the entire ledger from genesis to tip
    */
-  public static verifyLedgerIntegrity(): LedgerVerificationResult {
-    const blocks = db.ledger_blocks;
+  public static async verifyLedgerIntegrity(): Promise<LedgerVerificationResult> {
+    const blocks = await LedgerRepository.getAllBlocks();
     const checkedAt = new Date().toISOString();
 
     if (blocks.length === 0) {
@@ -212,27 +211,43 @@ export class LedgerService {
   /**
    * Simulates tampering on a specific block for demo/testing purposes
    */
-  public static simulateTamper(blockIndex: number, fakePayload: Record<string, any>): boolean {
-    if (blockIndex < 0 || blockIndex >= db.ledger_blocks.length) return false;
-    db.ledger_blocks[blockIndex].payload = { ...db.ledger_blocks[blockIndex].payload, ...fakePayload, _tampered: true };
-    db.save();
-    return true;
+  public static async simulateTamper(blockIndex: number, fakePayload: Record<string, any>): Promise<boolean> {
+    const block = await LedgerRepository.getBlockByIndex(blockIndex);
+    if (!block) return false;
+
+    const originalPayload = typeof block.payload === 'string' ? block.payload : JSON.stringify(block.payload);
+    const newPayload = { ...block.payload, ...fakePayload, _tampered: true, _originalPayload: originalPayload };
+    return LedgerRepository.updateBlock(blockIndex, newPayload, block.blockHash);
   }
 
   /**
    * Repairs any simulated tamper by re-calculating proper hash chain
    */
-  public static repairLedger(): boolean {
-    const blocks = db.ledger_blocks;
+  public static async repairLedger(): Promise<boolean> {
+    const blocks = await LedgerRepository.getAllBlocks();
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
-      if (block.payload._tampered) {
-        delete block.payload._tampered;
+      let changed = false;
+      if (block.payload && block.payload._tampered) {
+        if (block.payload._originalPayload) {
+          block.payload = JSON.parse(block.payload._originalPayload);
+        } else {
+          delete block.payload._tampered;
+          delete block.payload.rogueModification;
+        }
+        changed = true;
       }
-      block.previousHash = i === 0 ? this.GENESIS_PREV_HASH : blocks[i - 1].blockHash;
-      block.blockHash = this.calculateExpectedBlockHash(block);
+      const expectedPrevHash = i === 0 ? this.GENESIS_PREV_HASH : blocks[i - 1].blockHash;
+      if (block.previousHash !== expectedPrevHash) {
+        block.previousHash = expectedPrevHash;
+        changed = true;
+      }
+      const expectedBlockHash = this.calculateExpectedBlockHash(block);
+      if (block.blockHash !== expectedBlockHash || changed) {
+        block.blockHash = expectedBlockHash;
+        await LedgerRepository.updateBlock(block.blockIndex, block.payload, block.blockHash, block.previousHash);
+      }
     }
-    db.save();
     return true;
   }
 }

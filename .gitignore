@@ -1,4 +1,4 @@
-﻿# Dependencies
+# Dependencies
 node_modules/
 **/node_modules/
 
@@ -29,3 +29,13 @@ Thumbs.db
 
 # AI Agent metadata
 .agents/
+
+# PostgreSQL cluster data directory
+server/data/pgdata/
+**/pgdata/
+
+# Test generated storage files
+server/data/storage/DOC-1791*
+server/data/storage/RED-1791*
+
+

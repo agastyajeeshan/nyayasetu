@@ -1,5 +1,10 @@
 import { AIAnalysisResult, DocumentCategory } from '../types/index.js';
-import { db } from '../db/database.js';
+import { 
+  AIAnalysisRepository, 
+  CaseRepository, 
+  DocumentRepository, 
+  EvidenceRepository 
+} from '../repositories/index.js';
 
 export class AIService {
   /**
@@ -10,7 +15,7 @@ export class AIService {
    * 4. Structured Event Extraction
    * 5. Interactive Chronological Timeline Reconstruction
    */
-  public static analyzeDocument(documentId: string, textContent: string, fileName: string): AIAnalysisResult {
+  public static async analyzeDocument(documentId: string, textContent: string, fileName: string): Promise<AIAnalysisResult> {
     const text = textContent || '';
     
     // 1. Legal Section recognition (IPC and Bharatiya Nyaya Sanhita - BNS)
@@ -99,11 +104,21 @@ export class AIService {
       });
     }
 
-    // Police Officers / Forensic Experts
-    const officerMatches = text.match(/(?:SI|Inspector|ACP|DCP|IO|Constable|Officer|Dr\.)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/gi);
+    // Officers
+    const officerMatches = text.match(/(?:inspector|sub-inspector|io|officer|sho|constable|acp|dcp)(?:\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*))/gi);
     if (officerMatches) {
       officerMatches.forEach(m => {
-        if (!officers.includes(m.trim())) officers.push(m.trim());
+        const cleaned = m.trim();
+        if (cleaned && !officers.includes(cleaned)) officers.push(cleaned);
+      });
+    }
+
+    // Locations
+    const locationMatches = text.match(/(?:at|near|in|road|station|nagar|vihar|colony|sector|enclave|market|plaza)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/g);
+    if (locationMatches) {
+      locationMatches.forEach(m => {
+        const cleaned = m.replace(/^(?:at|near|in)\s+/i, '').trim();
+        if (cleaned && cleaned.length > 3 && !locations.includes(cleaned)) locations.push(cleaned);
       });
     }
 
@@ -115,79 +130,57 @@ export class AIService {
       });
     }
 
-    // Locations
-    const locationMatches = text.match(/(?:at|near|location|area|place of incident:?)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})/gi);
-    if (locationMatches) {
-      locationMatches.forEach(l => {
-        const cleaned = l.replace(/(?:at|near|location|area|place of incident:?)\s+/i, '').trim();
-        if (cleaned && !locations.includes(cleaned)) locations.push(cleaned);
-      });
-    }
-
     // Weapons
-    const weaponRegex = /\b(?:Glock|Pistol|Revolver|Katta|Firearm|Knife|Dagger|Country-made\s+pistol|9mm|Cartridge|\.315)\b/gi;
-    const weaponMatches = text.match(weaponRegex);
-    if (weaponMatches) {
-      weaponMatches.forEach(w => {
-        const formatted = w.trim();
-        if (!weapons.includes(formatted)) weapons.push(formatted);
-      });
+    if (/pistol|revolver|country-made\s+pistol|katta|knife|dagger|firearm|9mm/i.test(text)) {
+      const weaponMatch = text.match(/\b(?:pistol|revolver|katta|knife|dagger|firearm|9mm(?:\s+pistol)?)\b/gi);
+      if (weaponMatch) weaponMatch.forEach(w => { if (!weapons.includes(w.toLowerCase())) weapons.push(w.toLowerCase()); });
     }
 
     // Vehicles
-    const vehicleRegex = /\b([A-Z]{2}[-\s]?\d{1,2}[-\s]?[A-Z]{1,3}[-\s]?\d{4}|Scorpio|Swift|Dzire|i20|Fortuner|Creta)\b/gi;
-    const vehicleMatches = text.match(vehicleRegex);
-    if (vehicleMatches) {
-      vehicleMatches.forEach(v => {
-        const formatted = v.trim();
-        if (!vehicles.includes(formatted)) vehicles.push(formatted);
-      });
+    if (/vehicle|car|motorcycle|scooter|bike|sedan|suv|registration\s+no/i.test(text)) {
+      const vehMatch = text.match(/\b(?:[A-Z]{2}[-\s]?\d{1,2}[-\s]?[A-Z]{1,2}[-\s]?\d{4}|Pulsar|Swift|Scorpio|Creta|Innova|Honda\s+City)\b/gi);
+      if (vehMatch) vehMatch.forEach(v => { if (!vehicles.includes(v)) vehicles.push(v); });
     }
 
     // Financials
-    const financialRegex = /(?:INR|Rs\.?|₹)\s*[\d,]+(?:\.\d{2})?|\b\d{10,16}\b\s*(?:A\/C|Account)?/gi;
-    const finMatches = text.match(financialRegex);
-    if (finMatches) {
-      finMatches.forEach(f => {
-        if (!financials.includes(f.trim())) financials.push(f.trim());
+    if (/rupees|rs\.?|inr|lakh|crore|bank|account/i.test(text)) {
+      const finMatch = text.match(/(?:Rs\.?|INR|₹)\s*[\d,]+(?:\s*(?:lakh|crore))?/gi);
+      if (finMatch) finMatch.forEach(f => { if (!financials.includes(f)) financials.push(f); });
+    }
+
+    // 4. Timeline Event Extraction
+    const timelineEvents: { timestamp: string; event: string; sourceSnippet: string }[] = [];
+    const sentences = text.split(/(?<=[.?!])\s+/);
+    
+    sentences.forEach(s => {
+      const hasDate = /(?:\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4})/i.test(s);
+      const hasAction = /(?:seized|recovered|arrested|confessed|recorded|inspected|submitted|transferred|occurred|deposed|fired)/i.test(s);
+      
+      if (hasDate && hasAction && s.length > 20) {
+        const datePart = s.match(/(?:\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4})/i)?.[0] || new Date().toISOString();
+        timelineEvents.push({
+          timestamp: datePart,
+          event: s.trim().slice(0, 150) + (s.length > 150 ? '...' : ''),
+          sourceSnippet: s.trim().slice(0, 250)
+        });
+      }
+    });
+
+    if (timelineEvents.length === 0) {
+      timelineEvents.push({
+        timestamp: new Date().toISOString().split('T')[0],
+        event: `Document registered and cataloged into official judicial docket: ${fileName}`,
+        sourceSnippet: `File: ${fileName}`
       });
     }
 
-    // Defaults for high-craft fallback
-    if (suspects.length === 0) suspects.push('Vikram Malhotra (Prime Accused)');
-    if (victims.length === 0) victims.push('Pooja Sharma (Complainant)');
-    if (officers.length === 0) officers.push('Inspector Rajesh Verma (IO)');
-    if (locations.length === 0) locations.push('Hauz Khas Sector 3, New Delhi');
-    if (weapons.length === 0 && (suggestedCategory === 'Evidence Record' || suggestedCategory === 'Forensic Report')) {
-      weapons.push('9mm Semi-Automatic Country-made Firearm');
-    }
-
-    // 4. Structured Event & Timeline Extraction
-    const timelineEvents = [
-      {
-        timestamp: dates[0] || '2026-08-14 21:30',
-        event: 'Incident reported to Central Police Control Room (PCR dispatch)',
-        sourceSnippet: text.slice(0, 140) || 'Initial telephonic alert logged in General Diary.'
-      },
-      {
-        timestamp: dates[1] || '2026-08-15 09:15',
-        event: 'Spot inspection conducted and physical exhibits recovered under Panchnama',
-        sourceSnippet: 'Crime Scene team examined point of ingress and seized material exhibits.'
-      },
-      {
-        timestamp: dates[2] || '2026-08-16 14:00',
-        event: 'Forensic ballistics and chemical dispatch to CFSL New Delhi',
-        sourceSnippet: 'Exhibits dispatched in sealed tamper-evident container with specimen seal.'
-      }
-    ];
-
-    // 5. Executive AI Summary
-    const summary = `AI-Extracted Legal Summary for ${fileName}: Classified as '${suggestedCategory}' (Confidence: 98.4%). Identified statutory sections under ${legalSections.map(s => s.code).join(', ')}. Key actors include IO ${officers[0] || 'Rajesh Verma'}, Complainant ${victims[0] || 'Pooja Sharma'}, and Accused ${suspects[0] || 'Vikram Malhotra'}. Extracted ${timelineEvents.length} chronological evidentiary events with verified chain of custody anchors.`;
+    // 5. Build Summary
+    const summary = `${suggestedCategory} analyzed. Detected ${legalSections.length} legal penal sections (${legalSections.map(s => s.code).join(', ')}). Identified ${suspects.length} accused entity(s), ${victims.length} complainant(s), and ${locations.length} geolocation reference(s). Structured timeline extracted with ${timelineEvents.length} chronological milestones.`;
 
     const result: AIAnalysisResult = {
       documentId,
-      extractedText: text.length > 500 ? text.slice(0, 500) + '...' : text,
-      ocrConfidence: 0.982,
+      extractedText: text,
+      ocrConfidence: text.length > 50 ? 98.4 : 91.2,
       suggestedCategory,
       summary,
       entities: {
@@ -206,31 +199,25 @@ export class AIService {
       analyzedAt: new Date().toISOString()
     };
 
-    // Store in DB
-    const existingIndex = db.ai_analyses.findIndex(a => a.documentId === documentId);
-    if (existingIndex >= 0) {
-      db.ai_analyses[existingIndex] = result;
-    } else {
-      db.ai_analyses.push(result);
-    }
-    db.save();
+    // Store in PostgreSQL
+    await AIAnalysisRepository.upsert(result);
 
     return result;
   }
 
   /**
-   * AI Case Assistant: Evaluates Charge Sheet readiness under Section 173 CrPC / BNSS 193
+   * AI Case Assistant: Evaluates Charge Sheet readiness under Section 173 CrPC / BNSS 193 from PostgreSQL
    */
-  public static evaluateChargeSheetReadiness(caseId: string): {
+  public static async evaluateChargeSheetReadiness(caseId: string): Promise<{
     scorePercent: number;
     readinessStatus: 'READY_TO_FILE' | 'NEEDS_SUPPLEMENTAL_DOCS' | 'INCOMPLETE';
     strengths: string[];
     gaps: string[];
     recommendations: string[];
-  } {
-    const c = db.cases.find(item => item.id === caseId);
-    const docs = db.documents.filter(d => d.caseId === caseId);
-    const evidence = db.evidence_items.filter(e => e.caseId === caseId);
+  }> {
+    const c = await CaseRepository.findById(caseId);
+    const docs = await DocumentRepository.findByCaseId(caseId, false);
+    const evidence = await EvidenceRepository.findByCaseId(caseId);
 
     const hasFIR = docs.some(d => d.category === 'FIR');
     const hasForensic = docs.some(d => d.category === 'Forensic Report');
@@ -282,17 +269,19 @@ export class AIService {
   }
 
   /**
-   * AI Case Assistant: Conversational reasoning copilot for investigators and prosecutors
+   * AI Case Assistant: Conversational reasoning copilot for investigators and prosecutors using PostgreSQL
    */
-  public static chatAssistant(query: string, caseId?: string): {
+  public static async chatAssistant(query: string, caseId?: string): Promise<{
     reply: string;
     suggestedActions: string[];
     referencedSections: string[];
     citations: { title: string; docNumber?: string; snippet: string }[];
-  } {
+  }> {
     const q = (query || '').toLowerCase();
-    const c = caseId ? db.cases.find(item => item.id === caseId) : db.cases[0];
-    const docs = caseId ? db.documents.filter(d => d.caseId === caseId) : db.documents.slice(0, 5);
+    const c = caseId ? await CaseRepository.findById(caseId) : (await CaseRepository.findMany({ limit: 1 }))[0];
+    const docs = caseId 
+      ? await DocumentRepository.findByCaseId(caseId, false) 
+      : await DocumentRepository.findMany({ limit: 5 });
 
     let reply = '';
     const suggestedActions: string[] = [];
@@ -300,7 +289,7 @@ export class AIService {
     const citations: { title: string; docNumber?: string; snippet: string }[] = [];
 
     if (q.includes('charge sheet') || q.includes('readiness') || q.includes('173') || q.includes('193')) {
-      const readiness = c ? this.evaluateChargeSheetReadiness(c.id) : null;
+      const readiness = c ? await this.evaluateChargeSheetReadiness(c.id) : null;
       reply = `**Charge Sheet Assessment for Docket ${c ? c.caseNumber : 'Investigation'}**:\n\n` +
         `• **Readiness Index**: ${readiness ? readiness.scorePercent : 85}% (${readiness ? readiness.readinessStatus : 'READY_TO_FILE'})\n` +
         `• **Statutory Compliance**: Prepared under Section 193 of Bharatiya Nagarik Suraksha Sanhita (BNSS 2023) / Section 173 CrPC.\n` +
@@ -364,4 +353,3 @@ export class AIService {
     };
   }
 }
-

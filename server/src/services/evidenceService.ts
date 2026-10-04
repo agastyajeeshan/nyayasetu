@@ -1,5 +1,11 @@
 import { v4 as uuidv4 } from 'uuid';
-import { db } from '../db/database.js';
+import { 
+  EvidenceRepository, 
+  CustodyRepository, 
+  CaseRepository, 
+  DocumentRepository 
+} from '../repositories/index.js';
+import { PostgresService } from '../db/postgres.js';
 import { CryptoService } from './cryptoService.js';
 import { LedgerService } from './ledgerService.js';
 import { AuditService } from './auditService.js';
@@ -37,14 +43,15 @@ export interface TransferCustodyParams {
 
 export class EvidenceService {
   /**
-   * Registers a new piece of forensic/physical evidence
+   * Registers a new piece of forensic/physical evidence inside a PostgreSQL transaction
    */
-  public static createEvidence(params: CreateEvidenceParams): EvidenceItem {
-    const caseItem = db.cases.find(c => c.id === params.caseId);
+  public static async createEvidence(params: CreateEvidenceParams): Promise<EvidenceItem> {
+    const caseItem = await CaseRepository.findById(params.caseId) || await CaseRepository.findByCaseNumber(params.caseId);
     if (!caseItem) throw new Error(`Case '${params.caseId}' not found.`);
 
     const evidenceId = `EVD-${Date.now()}-${uuidv4().slice(0, 6)}`;
-    const evidenceNumber = `EVD-${new Date().getFullYear()}-${db.evidence_items.length + 101}`;
+    const count = (await EvidenceRepository.count()) + 101;
+    const evidenceNumber = `EVD-${new Date().getFullYear()}-${count}`;
     const sha256Hash = CryptoService.sha256(`${evidenceId}:${params.type}:${params.description}:${params.rawSampleOrDigest}`);
 
     const item: EvidenceItem = {
@@ -69,13 +76,10 @@ export class EvidenceService {
       updatedAt: new Date().toISOString()
     };
 
-    db.evidence_items.unshift(item);
-
-    // Create Initial Custody Event
+    // Initial custody event & ledger anchoring
     const hashProof = CryptoService.sha256(`CUSTODY_INIT:${evidenceId}:${params.actorName}:${params.storageLocker}:${new Date().toISOString()}`);
-    
-    // Anchor to ledger
-    const ledgerBlock = LedgerService.createBlock({
+
+    const ledgerBlock = await LedgerService.createBlock({
       eventType: 'EVIDENCE_COLLECTED',
       resourceType: 'EVIDENCE',
       resourceId: item.id,
@@ -110,10 +114,12 @@ export class EvidenceService {
       ledgerBlockId: ledgerBlock.blockHash
     };
 
-    db.custody_events.push(initialEvent);
-    db.save();
+    await PostgresService.withTransaction(async () => {
+      await EvidenceRepository.create(item);
+      await CustodyRepository.create(initialEvent);
+    });
 
-    AuditService.log({
+    await AuditService.log({
       actorId: params.actorId,
       actorName: params.actorName,
       actorRole: params.actorRole,
@@ -132,21 +138,17 @@ export class EvidenceService {
   }
 
   /**
-   * Transfers custody of evidence to another custodian / forensic lab / court
+   * Transfers custody of evidence to another custodian / forensic lab / court inside a PostgreSQL transaction
    */
-  public static transferCustody(params: TransferCustodyParams): CustodyEvent {
-    const item = db.evidence_items.find(e => e.id === params.evidenceId);
+  public static async transferCustody(params: TransferCustodyParams): Promise<CustodyEvent> {
+    const item = await EvidenceRepository.findById(params.evidenceId);
     if (!item) throw new Error('Evidence item not found.');
 
     const previousCustodian = item.currentCustodian;
-    item.currentCustodian = params.toCustodian;
-    item.storageLocker = params.toLocation;
-    item.updatedAt = new Date().toISOString();
-
     const timestamp = new Date().toISOString();
     const hashProof = CryptoService.sha256(`CUSTODY_TRANSFER:${item.id}:${previousCustodian}->${params.toCustodian}:${timestamp}`);
 
-    const ledgerBlock = LedgerService.createBlock({
+    const ledgerBlock = await LedgerService.createBlock({
       eventType: 'EVIDENCE_CUSTODY_TRANSFERRED',
       resourceType: 'EVIDENCE',
       resourceId: item.id,
@@ -181,10 +183,16 @@ export class EvidenceService {
       ledgerBlockId: ledgerBlock.blockHash
     };
 
-    db.custody_events.push(event);
-    db.save();
+    await PostgresService.withTransaction(async () => {
+      await EvidenceRepository.update(item.id, {
+        currentCustodian: params.toCustodian,
+        storageLocker: params.toLocation,
+        updatedAt: timestamp
+      });
+      await CustodyRepository.create(event);
+    });
 
-    AuditService.log({
+    await AuditService.log({
       actorId: params.actorId,
       actorName: params.actorName,
       actorRole: params.actorRole,
@@ -203,21 +211,24 @@ export class EvidenceService {
   }
 
   /**
-   * Retrieves full custody timeline and evidence detail
+   * Retrieves full custody timeline and evidence detail from PostgreSQL
    */
-  public static getEvidenceDetail(evidenceId: string): {
+  public static async getEvidenceDetail(evidenceId: string): Promise<{
     evidence: EvidenceItem;
     custodyHistory: CustodyEvent[];
     linkedDocuments: any[];
-  } | null {
-    const item = db.evidence_items.find(e => e.id === evidenceId || e.evidenceNumber === evidenceId);
+  } | null> {
+    const item = await EvidenceRepository.findById(evidenceId) || await EvidenceRepository.findByEvidenceNumber(evidenceId);
     if (!item) return null;
 
-    const custodyHistory = db.custody_events
-      .filter(c => c.evidenceId === item.id)
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const custodyHistory = await CustodyRepository.findByEvidenceId(item.id);
+    custodyHistory.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
 
-    const linkedDocuments = db.documents.filter(d => item.linkedDocumentIds.includes(d.id));
+    const linkedDocuments: any[] = [];
+    for (const docId of item.linkedDocumentIds) {
+      const doc = await DocumentRepository.findById(docId);
+      if (doc) linkedDocuments.push(doc);
+    }
 
     return {
       evidence: item,
@@ -227,27 +238,9 @@ export class EvidenceService {
   }
 
   /**
-   * List all evidence items
+   * List all evidence items from PostgreSQL
    */
-  public static listEvidence(filters: { caseId?: string; type?: string; search?: string }): EvidenceItem[] {
-    let list = [...db.evidence_items];
-
-    if (filters.caseId) {
-      list = list.filter(e => e.caseId === filters.caseId || e.caseNumber === filters.caseId);
-    }
-    if (filters.type) {
-      list = list.filter(e => e.type === filters.type);
-    }
-    if (filters.search) {
-      const q = filters.search.toLowerCase();
-      list = list.filter(e =>
-        e.evidenceNumber.toLowerCase().includes(q) ||
-        e.description.toLowerCase().includes(q) ||
-        e.caseNumber.toLowerCase().includes(q) ||
-        e.currentCustodian.toLowerCase().includes(q)
-      );
-    }
-
-    return list;
+  public static async listEvidence(filters: { caseId?: string; type?: string; search?: string }): Promise<EvidenceItem[]> {
+    return EvidenceRepository.findMany(filters);
   }
 }
